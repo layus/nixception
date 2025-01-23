@@ -39,6 +39,7 @@ use crate::ontap_s3_store::OntapS3Store;
 use crate::redis_store::RedisStore;
 use crate::ref_store::RefStore;
 use crate::s3_store::S3Store;
+use crate::nix_store::NixStore;
 use crate::shard_store::ShardStore;
 use crate::size_partitioning_store::SizePartitioningStore;
 use crate::store_manager::StoreManager;
@@ -65,6 +66,7 @@ pub fn store_factory<'a>(
                     GcsStore::new(gcs_config, SystemTime::now).await?
                 }
             },
+            StoreSpec::NixStore(spec) => NixStore::new(spec).await?,
             StoreSpec::RedisStore(spec) => RedisStore::new(spec.clone())?,
             StoreSpec::Verify(spec) => VerifyStore::new(
                 spec,

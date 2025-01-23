@@ -333,7 +333,7 @@ impl From<&DigestInfo> for Digest {
 #[derive(
     Debug, Serialize, Deserialize, Default, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord,
 )]
-pub struct PackedHash([u8; 32]);
+pub struct PackedHash(pub [u8; 32]);
 
 const SIZE_OF_PACKED_HASH: usize = 32;
 impl PackedHash {

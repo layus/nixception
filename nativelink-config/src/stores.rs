@@ -498,6 +498,19 @@ pub enum StoreSpec {
     ///
     RedisStore(RedisSpec),
 
+    /// Stores data in a nix store through some nix daemon
+    ///
+    /// !! EXPERIMENTAL !!
+    ///
+    /// **Example JSON Config:**
+    /// ```json
+    /// "nix_store": {
+    ///     "socket: "unix://nix/var/nix/daemon-socket/socket"
+    /// }
+    /// ```
+    ///
+    NixStore(NixSpec),
+
     /// Noop store is a store that sends streams into the void and all data
     /// retrieval will return 404 (`NotFound`). This can be useful for cases
     /// where you may need to partition your data and part of your data needs
@@ -1176,6 +1189,13 @@ pub struct RedisSpec {
     /// ```
     #[serde(default)]
     pub retry: Retry,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct NixSpec {
+    /// The socket of the nix daemon.
+    #[serde(default)]
+    pub socket: String,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

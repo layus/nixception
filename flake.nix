@@ -502,6 +502,10 @@
               pkgs.nativelink-tools.local-image-test
               pkgs.nativelink-tools.native-cli
               pkgs.nativelink-tools.create-local-image
+
+              # Tools fo nix backend
+              pkgs.protobuf
+              pkgs.protoc-gen-rust
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               pkgs.darwin.apple_sdk.frameworks.CoreFoundation
