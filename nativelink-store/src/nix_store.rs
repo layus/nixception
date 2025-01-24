@@ -15,31 +15,31 @@
 use std::borrow::Cow;
 use std::marker::Send;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::path::Path;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
 
-use nativelink_error::ResultExt;
-use nativelink_util::fs;
-use nativelink_util::common::PackedHash;
-use nativelink_error::{Code, Error, make_err};
 use nativelink_config::stores::NixSpec;
+use nativelink_error::ResultExt;
+use nativelink_error::{make_err, Code, Error};
 use nativelink_metric::MetricsComponent;
+use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
+use nativelink_util::common::PackedHash;
+use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
 use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
-use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 
-use nix_compat::store_path::build_ca_path;
-use nix_compat::store_path::StorePath;
 use nix_compat::nixhash::CAHash;
 use nix_compat::nixhash::NixHash;
+use nix_compat::store_path::build_ca_path;
+use nix_compat::store_path::StorePath;
 use nix_remote::worker_op::Resp;
 use nix_remote::worker_op::StreamingRecv;
-use nix_remote::worker_op::{AddToStore, WithFramedSource};
 use nix_remote::worker_op::WorkerOp;
+use nix_remote::worker_op::{AddToStore, WithFramedSource};
 use nix_remote::StorePathSet;
 use nix_remote::ValidPathInfoWithPath;
 use nix_remote::{nix_client::NixDaemonClient, stderr::Msg};
@@ -54,7 +54,9 @@ pub struct NixStore {
 
 impl NixStore {
     pub async fn new(spec: &NixSpec) -> Result<Arc<Self>, Error> {
-        Ok(Arc::new(Self { socket_path: spec.socket.to_string() }))
+        Ok(Arc::new(Self {
+            socket_path: spec.socket.to_string(),
+        }))
     }
 }
 
@@ -69,24 +71,29 @@ impl HealthStatusIndicator for NixStore {
     }
 }
 
-fn key_to_store_path(
-    key: &StoreKey,
-) -> Result<StorePath<String>, Error> {
+fn key_to_store_path(key: &StoreKey) -> Result<StorePath<String>, Error> {
     let mykey = key.borrow();
     let digest = mykey.into_digest();
     let PackedHash(hash) = digest.packed_hash();
     let ca = CAHash::Flat(NixHash::Sha256(*hash));
-    build_ca_path("reapi-adapted", &ca, std::iter::empty::<&str>(), false)
-        .map_err(|_| make_err!(Code::InvalidArgument, "Failed to convert key into store path."))
+    build_ca_path("reapi-adapted", &ca, std::iter::empty::<&str>(), false).map_err(|e| {
+        make_err!(
+            Code::InvalidArgument,
+            "Failed to convert key into store path: {}",
+            e
+        )
+    })
 }
 
-fn key_to_ca(
-    key: &StoreKey,
-) -> CAHash {
-    let mykey = key.borrow();
-    let digest = mykey.into_digest();
+fn key_to_ca(key: &StoreKey) -> Result<CAHash, Error> {
+    let StoreKey::Digest(digest) = key else {
+        return Err(make_err!(
+            Code::InvalidArgument,
+            "Nix backend does not support arbirary strings as keys"
+        ));
+    };
     let PackedHash(hash) = *digest.packed_hash();
-    CAHash::Flat(NixHash::Sha256(hash))
+    Ok(CAHash::Flat(NixHash::Sha256(hash)))
 }
 
 #[async_trait]
@@ -101,8 +108,7 @@ impl StoreDriver for NixStore {
                 // XXX: Use is_valid_path instead
                 Path::new(&sp.to_absolute_path())
                     .symlink_metadata()
-                    .map(|m| m.len()).ok()
-            )
+                    .map(|m| m.len()).ok())
         }
         Ok(())
     }
@@ -116,37 +122,44 @@ impl StoreDriver for NixStore {
         // add to store
         //let mut nix = NixProxy::new(std::io::stdin(), std::io::stdout());
 
-        println!("Started");
         let mut client = {
             let socket = UnixStream::connect(self.socket_path.clone())?;
-            NixDaemonClient::new(socket.try_clone()?, socket).map_err(|e| make_err!(Code::Internal, "{}", e))
+            NixDaemonClient::new(socket.try_clone()?, socket)
+                .map_err(|e| make_err!(Code::Internal, "{}", e))
         }?;
 
-        let nix_ca = key_to_ca(&digest).to_nix_nixbase32_string();
+        let nix_ca = key_to_ca(&digest)?.to_nix_nixbase32_string();
         let add_to_store_op = AddToStore {
             name: nix_remote::StorePath("reapi-adapted".to_string().into()),
             cam_str: nix_remote::StorePath(nix_ca.into()),
-            refs: StorePathSet{paths : vec![]},
+            refs: StorePathSet { paths: vec![] },
             repair: false,
         };
         let response_type: Resp<ValidPathInfoWithPath> = Default::default();
         let add_to_store_worker_op =
             &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
 
-        client.send_worker_op_to_daemon(add_to_store_worker_op).unwrap();
+        client
+            .send_worker_op_to_daemon(add_to_store_worker_op)
+            .unwrap();
 
         debug_assert!(add_to_store_worker_op.requires_streaming());
 
         // Stream data
         let mut length_of_stream: usize = match upload_size {
             UploadSizeInfo::ExactSize(size) => Ok(size.try_into().unwrap()),
-            UploadSizeInfo::MaxSize(_) => Err(make_err!(Code::Unimplemented,"Size approximations are not supported yet")),
+            UploadSizeInfo::MaxSize(_) => Err(make_err!(
+                Code::Unimplemented,
+                "Size approximations are not supported yet"
+            )),
         }?;
         while length_of_stream > 0 {
             let bytes = reader.recv().await.unwrap();
             let chunk_len = bytes.len();
             client.streaming_write_len(chunk_len as u64).unwrap();
-            client.streaming_write_buff(bytes.as_ref(), chunk_len).unwrap();
+            client
+                .streaming_write_buff(bytes.as_ref(), chunk_len)
+                .unwrap();
             length_of_stream -= chunk_len;
         }
         client.streaming_write_len(0).unwrap();
@@ -162,13 +175,21 @@ impl StoreDriver for NixStore {
         }
 
         // Get reply, finally
-        let _reply = client.read_build_response_from_daemon(&response_type).map_err(|e| make_err!(Code::Internal, "{}", e))?;
-        println!("{:#?}", _reply);
+        let _reply = client
+            .read_build_response_from_daemon(&response_type)
+            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
 
+        // Write to nix store was successful, but we need to check that the
+        // content matches the digest in the key. We do not support arbitrary
+        // keys, only sh256 digests of the content.
         let sp = key_to_store_path(&digest)?;
-        assert!(_reply.path.0 == sp.to_absolute_path().into());
-
-        Ok(())
+        (_reply.path.0 == sp.to_absolute_path().into())
+            .then_some(())
+            .ok_or(make_err!(
+                Code::InvalidArgument,
+                "Key {:?} does not match the content.",
+                &digest
+            ))
     }
 
     async fn get_part(
