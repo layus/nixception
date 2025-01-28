@@ -498,8 +498,8 @@
               docs
               generate-toolchains
               pkgs.lre.clang
-              pkgs.lre.nil
-              pkgs.lre.nixd
+              pkgs.nil
+              pkgs.nixd
               pkgs.lre.lre-cc.lre-cc-configs-gen
               pkgs.nativelink-tools.local-image-test
               pkgs.nativelink-tools.native-cli

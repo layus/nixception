@@ -32,7 +32,7 @@ const FOO_HASH: &str = "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b87
 async fn insert_simple() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;
@@ -48,7 +48,7 @@ async fn insert_simple() -> Result<(), Error> {
 async fn read_simple() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;
@@ -69,7 +69,7 @@ async fn read_simple() -> Result<(), Error> {
 async fn read_part() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;
@@ -90,7 +90,7 @@ async fn read_part() -> Result<(), Error> {
 async fn simple_has_object_found() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;
@@ -108,7 +108,7 @@ async fn simple_has_object_found() -> Result<(), Error> {
 async fn simple_has_object_not_found() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;
@@ -126,7 +126,7 @@ async fn simple_has_object_not_found() -> Result<(), Error> {
 async fn roundtrip() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
-            socket: SOCKET_PATH.to_string(),
+            socket_path: Some(SOCKET_PATH.to_string()),
         }),
     )
     .await?;

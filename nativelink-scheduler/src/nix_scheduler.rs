@@ -17,7 +17,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use futures::Future;
-use nativelink_config::schedulers::{NixProxySpec, SimpleSpec, WorkerAllocationStrategy};
+use nativelink_config::schedulers::{NixProxySpec, WorkerAllocationStrategy};
 use nativelink_error::{Code, Error, ResultExt};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_util::action_messages::{ActionInfo, ActionState, OperationId, WorkerId};
