@@ -1195,7 +1195,7 @@ pub struct RedisSpec {
 pub struct NixSpec {
     /// The socket of the nix daemon.
     #[serde(default)]
-    pub socket: String,
+    pub socket_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

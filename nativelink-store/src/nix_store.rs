@@ -55,7 +55,10 @@ pub struct NixStore {
 impl NixStore {
     pub async fn new(spec: &NixSpec) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self {
-            socket_path: spec.socket.to_string(),
+            socket_path: spec
+                .socket_path
+                .clone()
+                .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string()),
         }))
     }
 }
@@ -123,9 +126,13 @@ impl StoreDriver for NixStore {
         //let mut nix = NixProxy::new(std::io::stdin(), std::io::stdout());
 
         let mut client = {
-            let socket = UnixStream::connect(self.socket_path.clone())?;
-            NixDaemonClient::new(socket.try_clone()?, socket)
-                .map_err(|e| make_err!(Code::Internal, "{}", e))
+            let read_socket = UnixStream::connect(self.socket_path.clone())
+                .err_tip(|| format!("While opening socket '{}'", self.socket_path))?;
+            let write_socket = read_socket
+                .try_clone()
+                .err_tip(|| "While cloning nix daemon socket")?;
+            NixDaemonClient::new(read_socket, write_socket)
+                .map_err(|e| make_err!(Code::Internal, "While creating a new NixClient: {}", e))
         }?;
 
         let nix_ca = key_to_ca(&digest)?.to_nix_nixbase32_string();
@@ -139,18 +146,20 @@ impl StoreDriver for NixStore {
         let add_to_store_worker_op =
             &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
 
-        client
+        let () = client
             .send_worker_op_to_daemon(add_to_store_worker_op)
-            .unwrap();
+            .map_err(|e| make_err!(Code::Internal, "Sending AddToStore op to daemon: {}", e))?;
 
         debug_assert!(add_to_store_worker_op.requires_streaming());
 
         // Stream data
         let mut length_of_stream: usize = match upload_size {
-            UploadSizeInfo::ExactSize(size) => Ok(size.try_into().unwrap()),
+            UploadSizeInfo::ExactSize(size) => size
+                .try_into()
+                .map_err(|_| make_err!(Code::Internal, "Cannot convert {} to usize", size)),
             UploadSizeInfo::MaxSize(_) => Err(make_err!(
                 Code::Unimplemented,
-                "Size approximations are not supported yet"
+                "Size approximations are not supported by NixStore"
             )),
         }?;
         while length_of_stream > 0 {
@@ -183,13 +192,15 @@ impl StoreDriver for NixStore {
         // content matches the digest in the key. We do not support arbitrary
         // keys, only sh256 digests of the content.
         let sp = key_to_store_path(&digest)?;
-        (_reply.path.0 == sp.to_absolute_path().into())
+        let () = ((_reply.path.0) == sp.to_absolute_path().into())
             .then_some(())
             .ok_or(make_err!(
                 Code::InvalidArgument,
                 "Key {:?} does not match the content.",
                 &digest
-            ))
+            ))?;
+
+        Ok(())
     }
 
     async fn get_part(
