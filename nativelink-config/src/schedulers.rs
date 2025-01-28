@@ -26,6 +26,7 @@ pub enum SchedulerSpec {
     Grpc(GrpcSpec),
     CacheLookup(CacheLookupSpec),
     PropertyModifier(PropertyModifierSpec),
+    NixProxy(NixProxySpec),
 }
 
 /// When the scheduler matches tasks to workers that are capable of running
@@ -217,3 +218,7 @@ pub struct PropertyModifierSpec {
     /// The nested scheduler to use after modifying the properties.
     pub scheduler: Box<SchedulerSpec>,
 }
+
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct NixProxySpec {}

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use nativelink_config::schedulers::{
-    ExperimentalSimpleSchedulerBackend, SchedulerSpec, SimpleSpec,
+    ExperimentalSimpleSchedulerBackend, NixProxySpec, SchedulerSpec, SimpleSpec,
 };
 use nativelink_config::stores::EvictionPolicy;
 use nativelink_error::{Error, ResultExt, make_input_err};
@@ -34,6 +34,9 @@ use crate::property_modifier_scheduler::PropertyModifierScheduler;
 use crate::simple_scheduler::SimpleScheduler;
 use crate::store_awaited_action_db::StoreAwaitedActionDb;
 use crate::worker_scheduler::WorkerScheduler;
+
+// lol
+use crate::nix_scheduler::NixScheduler;
 
 /// Default timeout for recently completed actions in seconds.
 /// If this changes, remember to change the documentation in the config.
@@ -84,6 +87,9 @@ fn inner_scheduler_factory(
                 action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
             ));
             (Some(property_modifier_scheduler), worker_scheduler)
+        }
+        SchedulerSpec::nix_proxy(spec) => {
+            nix_scheduler_factory(spec, store_manager, SystemTime::now)?
         }
     };
 
@@ -151,6 +157,22 @@ fn simple_scheduler_factory(
             Ok((Some(action_scheduler), Some(worker_scheduler)))
         }
     }
+}
+
+fn nix_scheduler_factory(
+    spec: &NixProxySpec,
+    store_manager: &StoreManager,
+    now_fn: fn() -> SystemTime,
+) -> Result<SchedulerFactoryResults, Error> {
+    let task_change_notify = Arc::new(Notify::new());
+    let awaited_action_db = memory_awaited_action_db_factory(
+        /* spec.retain_completed_for_s */ 0,
+        &task_change_notify.clone(),
+        SystemTime::now,
+    );
+    let (action_scheduler, worker_scheduler) =
+        NixScheduler::new(spec, awaited_action_db, task_change_notify);
+    Ok((Some(action_scheduler), Some(worker_scheduler)))
 }
 
 pub fn memory_awaited_action_db_factory<I, NowFn>(
