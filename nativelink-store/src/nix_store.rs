@@ -138,7 +138,7 @@ impl StoreDriver for NixStore {
         let nix_ca = key_to_ca(&digest)?.to_nix_nixbase32_string();
         let add_to_store_op = AddToStore {
             name: nix_remote::StorePath("reapi-adapted".to_string().into()),
-            cam_str: nix_remote::StorePath(nix_ca.into()),
+            cam_str: nix_remote::StorePath(nix_ca.clone().into()),
             refs: StorePathSet { paths: vec![] },
             repair: false,
         };
@@ -191,8 +191,7 @@ impl StoreDriver for NixStore {
         // Write to nix store was successful, but we need to check that the
         // content matches the digest in the key. We do not support arbitrary
         // keys, only sh256 digests of the content.
-        let sp = key_to_store_path(&digest)?;
-        let () = ((_reply.path.0) == sp.to_absolute_path().into())
+        let () = (_reply.info.content_address.to_string().unwrap() == nix_ca)
             .then_some(())
             .ok_or(make_err!(
                 Code::InvalidArgument,
