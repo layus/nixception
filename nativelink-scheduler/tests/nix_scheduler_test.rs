@@ -30,7 +30,6 @@ use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::instant_wrapper::MockInstantWrapped;
 use nativelink_util::operation_state_manager::ClientStateManager;
 use nativelink_util::platform_properties::PlatformProperties;
-use pretty_assertions::assert_eq;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
