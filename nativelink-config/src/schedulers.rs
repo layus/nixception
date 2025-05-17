@@ -219,6 +219,6 @@ pub struct PropertyModifierSpec {
     pub scheduler: Box<SchedulerSpec>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NixProxySpec {}
