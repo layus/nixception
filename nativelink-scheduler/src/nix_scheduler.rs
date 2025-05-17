@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use futures::{future, stream, Future, Stream, StreamExt};
+use futures::{stream, Future, StreamExt};
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::{Error, ResultExt};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
@@ -40,15 +40,15 @@ use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
 
-// Dummy struct to implement ActionStateResult
-struct DummyActionStateResult {
+// Struct to implement ActionStateResult for Nix scheduler
+struct NixActionStateResult {
     client_operation_id: OperationId,
     action_info: Arc<ActionInfo>,
     state_rx: watch::Receiver<Arc<ActionState>>,
 }
 
 #[async_trait]
-impl ActionStateResult for DummyActionStateResult {
+impl ActionStateResult for NixActionStateResult {
     async fn as_state(&self) -> Result<Arc<ActionState>, Error> {
         let mut state = self.state_rx.borrow().clone();
         Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
@@ -109,9 +109,9 @@ impl NixScheduler {
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
 
-        // Create a dummy worker scheduler
-        let (tx, _rx) = mpsc::unbounded_channel::<String>();
-        let worker_scheduler = Arc::new(DummyWorkerScheduler {
+        // Create a Nix worker scheduler
+        //let (_tx, _rx) = mpsc::unbounded_channel::<String>();
+        let worker_scheduler = Arc::new(NixWorkerScheduler {
             platform_property_manager: platform_property_manager.clone(),
         });
 
@@ -166,7 +166,7 @@ impl NixScheduler {
             "NixScheduler: Immediately completing action"
         );
 
-        Box::new(DummyActionStateResult {
+        Box::new(NixActionStateResult {
             client_operation_id,
             action_info,
             state_rx: rx,
@@ -216,21 +216,21 @@ impl KnownPlatformPropertyProvider for NixScheduler {
     }
 }
 
-// Simple implementation of the WorkerScheduler trait that does nothing
+// Implementation of the WorkerScheduler trait for Nix scheduler
 #[derive(MetricsComponent)]
-struct DummyWorkerScheduler {
+struct NixWorkerScheduler {
     #[metric(group = "platform_property_manager")]
     platform_property_manager: Arc<PlatformPropertyManager>,
 }
 
 #[async_trait]
-impl WorkerScheduler for DummyWorkerScheduler {
+impl WorkerScheduler for NixWorkerScheduler {
     fn get_platform_property_manager(&self) -> &PlatformPropertyManager {
         &self.platform_property_manager
     }
 
     async fn add_worker(&self, worker: Worker) -> Result<(), Error> {
-        event!(Level::INFO, worker_id = ?worker.id, "DummyWorkerScheduler: Adding worker (no-op)");
+        event!(Level::INFO, worker_id = ?worker.id, "NixWorkerScheduler: Adding worker (no-op)");
         // Send initial connection response to worker
         worker.tx.send(nativelink_proto::com::github::trace_machina::nativelink::remote_execution::UpdateForWorker {
             update: Some(nativelink_proto::com::github::trace_machina::nativelink::remote_execution::update_for_worker::Update::ConnectionResult(
@@ -253,7 +253,7 @@ impl WorkerScheduler for DummyWorkerScheduler {
             ?worker_id,
             ?operation_id,
             ?update,
-            "DummyWorkerScheduler: Update action (no-op)"
+            "NixWorkerScheduler: Update action (no-op)"
         );
         Ok(())
     }
@@ -267,7 +267,7 @@ impl WorkerScheduler for DummyWorkerScheduler {
             Level::DEBUG,
             ?worker_id,
             ?timestamp,
-            "DummyWorkerScheduler: Worker keep-alive received (no-op)"
+            "NixWorkerScheduler: Worker keep-alive received (no-op)"
         );
         Ok(())
     }
@@ -276,7 +276,7 @@ impl WorkerScheduler for DummyWorkerScheduler {
         event!(
             Level::INFO,
             ?worker_id,
-            "DummyWorkerScheduler: Removing worker (no-op)"
+            "NixWorkerScheduler: Removing worker (no-op)"
         );
         Ok(())
     }
@@ -285,7 +285,7 @@ impl WorkerScheduler for DummyWorkerScheduler {
         event!(
             Level::DEBUG,
             ?now_timestamp,
-            "DummyWorkerScheduler: Removing timed-out workers (no-op)"
+            "NixWorkerScheduler: Removing timed-out workers (no-op)"
         );
         Ok(())
     }
@@ -295,11 +295,11 @@ impl WorkerScheduler for DummyWorkerScheduler {
             Level::INFO,
             ?worker_id,
             ?is_draining,
-            "DummyWorkerScheduler: Setting worker drain status (no-op)"
+            "NixWorkerScheduler: Setting worker drain status (no-op)"
         );
         Ok(())
     }
 }
 
 impl RootMetricsComponent for NixScheduler {}
-impl RootMetricsComponent for DummyWorkerScheduler {}
+impl RootMetricsComponent for NixWorkerScheduler {}
