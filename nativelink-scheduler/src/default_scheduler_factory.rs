@@ -170,7 +170,6 @@ fn nix_scheduler_factory(
         &task_change_notify.clone(),
         SystemTime::now,
     );
-    let _b = now_fn;
     let ac_store = store_manager
         .get_store(&spec.ac_store)
         .err_tip(|| format!("'ac_store': '{}' does not exist", spec.ac_store))?;
