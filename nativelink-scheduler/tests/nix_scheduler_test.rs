@@ -79,6 +79,7 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify.clone(),
+        MockInstantWrapped::default,
         ac_store,
     );
 
@@ -159,6 +160,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify,
+        MockInstantWrapped::default,
         ac_store,
     );
 
@@ -190,6 +192,7 @@ async fn test_nix_scheduler_worker_operations() -> Result<(), Error> {
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify,
+        MockInstantWrapped::default,
         ac_store,
     );
 
