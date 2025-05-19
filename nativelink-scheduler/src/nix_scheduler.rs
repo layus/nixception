@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
 use futures::{stream, Future};
+use nativelink_util::common::DigestInfo;
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
@@ -26,12 +28,12 @@ use nativelink_util::action_messages::{
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
-    ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
+    ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter, OperationStageFlags,
     UpdateOperationType,
 };
 use nativelink_util::spawn;
 use nativelink_util::task::JoinHandleDropGuard;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{watch, Mutex as TokioMutex, Notify};
 use tokio::time::Duration;
 use tracing::{event, Level};
 
@@ -56,11 +58,17 @@ impl ActionStateResult for NixActionStateResult {
     }
 
     async fn changed(&mut self) -> Result<Arc<ActionState>, Error> {
-        // In a real implementation, we would wait for state to change
-        // Here we just return the current state immediately
-        let mut state = self.state_rx.borrow().clone();
-        Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
-        Ok(state)
+        // Wait for the state to change
+        if self.state_rx.changed().await.is_ok() {
+            let mut state = self.state_rx.borrow().clone();
+            Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
+            Ok(state)
+        } else {
+            // Channel closed
+            let mut state = self.state_rx.borrow().clone();
+            Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
+            Ok(state)
+        }
     }
 
     async fn as_action_info(&self) -> Result<Arc<ActionInfo>, Error> {
@@ -68,12 +76,15 @@ impl ActionStateResult for NixActionStateResult {
     }
 }
 
-/// A simplified Nix scheduler that immediately returns dummy results
+/// A simplified Nix scheduler that simulates running actions until timeout
 #[derive(MetricsComponent)]
 pub struct NixScheduler {
     /// Platform property manager
     #[metric(group = "platform_properties")]
     platform_property_manager: Arc<PlatformPropertyManager>,
+
+    /// All active actions (operation_id -> action state channel sender)
+    active_actions: Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
 
     /// Background task to make sure our scheduler is properly cleaned up
     _task_worker_matching_spawn: JoinHandleDropGuard<()>,
@@ -118,14 +129,77 @@ impl NixScheduler {
         let worker_scheduler_clone = worker_scheduler.clone();
 
         let action_scheduler = Arc::new_cyclic(move |_weak_self| -> Self {
+            let active_actions = Arc::new(TokioMutex::new(HashMap::<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>::new()));
+            let active_actions_clone = active_actions.clone();
+
             let task_worker_matching_spawn =
                 spawn!("nix_scheduler_task_worker_matching", async move {
-                    // Just wait for our task_change_notify to be dropped
+                    // Monitor active actions for timeouts
                     loop {
                         match task_change_notify.notified().await {
                             () => {
-                                // Do nothing, just loop
-                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                // Sleep a bit then check for timeouts
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+
+                                // Lock the actions
+                                let actions = active_actions_clone.lock().await;
+
+                                // Find actions that have timed out
+                                let now = SystemTime::now();
+                                let timed_out: Vec<_> = actions
+                                    .iter()
+                                    .filter_map(|(op_id, (action_info, _state_tx))| {
+                                        let start_time = SystemTime::now().checked_sub(Duration::from_secs(10)).unwrap_or(SystemTime::now());
+                                        let timeout_duration = action_info.timeout;
+
+                                        match now.duration_since(start_time) {
+                                            Ok(elapsed) if elapsed > timeout_duration => {
+                                                Some(op_id.clone())
+                                            }
+                                            _ => None,
+                                        }
+                                    })
+                                    .collect();
+
+                                // Update the timed out actions
+                                for op_id in &timed_out {
+                                    if let Some((action_info, state_tx)) = actions.get(op_id) {
+                                        let action_digest = action_info.digest();
+
+                                        // Create timeout error message
+                                        let mut result = ActionResult::default();
+                                        result.exit_code = 124; // Timeout exit code
+                                        result.message = "Action timed out".to_string();
+                                        result.stderr_digest = DigestInfo::zero_digest();
+
+                                        // Update the state
+                                        let new_state = Arc::new(ActionState {
+                                            client_operation_id: op_id.clone(),
+                                            stage: ActionStage::Completed(result),
+                                            action_digest,
+                                        });
+
+                                        let _ = state_tx.send(new_state);
+
+                                        event!(
+                                            Level::INFO,
+                                            ?op_id,
+                                            ?action_digest,
+                                            "NixScheduler: Action timed out"
+                                        );
+                                    }
+                                }
+
+                                // Remove timed out actions after a small delay to allow clients to see the completed state
+                                let timed_out_vec = timed_out.clone();
+                                let actions_clone = active_actions_clone.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    let mut actions = actions_clone.lock().await;
+                                    for op_id in timed_out_vec {
+                                        actions.remove(&op_id);
+                                    }
+                                });
                             }
                         }
                     }
@@ -135,6 +209,7 @@ impl NixScheduler {
 
             NixScheduler {
                 platform_property_manager,
+                active_actions,
                 _task_worker_matching_spawn: task_worker_matching_spawn,
             }
         });
@@ -142,28 +217,33 @@ impl NixScheduler {
         (action_scheduler, worker_scheduler_clone)
     }
 
-    async fn create_dummy_result(
+    async fn create_running_action(
         &self,
         client_operation_id: OperationId,
         action_info: Arc<ActionInfo>,
     ) -> Box<dyn ActionStateResult> {
-        // Create a completed action state
+        // Create a running action state
         let action_digest = action_info.digest();
-        let completed_state = Arc::new(ActionState {
+        let running_state = Arc::new(ActionState {
             client_operation_id: client_operation_id.clone(),
-            stage: ActionStage::Completed(ActionResult::default()),
+            stage: ActionStage::Executing,
             action_digest,
         });
 
-        // Create a watch channel with the completed state
-        let (tx, rx) = watch::channel(completed_state);
-        let _ = tx; // We won't use the sender
+        // Create a watch channel with the running state
+        let (tx, rx) = watch::channel(running_state);
+
+        // Store the action and sender in our active actions map
+        {
+            let mut actions = self.active_actions.lock().await;
+            actions.insert(client_operation_id.clone(), (action_info.clone(), tx));
+        }
 
         event!(
             Level::INFO,
             ?client_operation_id,
             ?action_digest,
-            "NixScheduler: Immediately completing action"
+            "NixScheduler: Starting action execution (will timeout)"
         );
 
         Box::new(NixActionStateResult {
@@ -182,7 +262,7 @@ impl ClientStateManager for NixScheduler {
         action_info: Arc<ActionInfo>,
     ) -> Result<Box<dyn ActionStateResult>, Error> {
         Ok(self
-            .create_dummy_result(client_operation_id, action_info)
+            .create_running_action(client_operation_id, action_info)
             .await)
     }
 
@@ -195,8 +275,48 @@ impl ClientStateManager for NixScheduler {
             ?filter,
             "NixScheduler: Filter operations called"
         );
-        // Return an empty stream - no operations to find
-        Ok(Box::pin(stream::empty()))
+
+        // Get a snapshot of current actions
+        let actions = self.active_actions.lock().await;
+
+        // Apply filters
+        let matches: Vec<_> = actions
+            .iter()
+            .filter_map(|(op_id, (action_info, state_tx))| {
+                // Filter by operation_id if specified
+                if let Some(filter_op_id) = &filter.operation_id {
+                    if filter_op_id != op_id {
+                        return None;
+                    }
+                }
+
+                // Filter by stage if specified
+                let state = state_tx.borrow();
+                let current_stage_flag = match &state.stage {
+                    ActionStage::Queued => OperationStageFlags::Queued,
+                    ActionStage::Executing => OperationStageFlags::Executing,
+                    ActionStage::Completed(_) => OperationStageFlags::Completed,
+                    ActionStage::Unknown => OperationStageFlags::Any,
+                    ActionStage::CacheCheck => OperationStageFlags::CacheCheck,
+                    ActionStage::CompletedFromCache(_) => OperationStageFlags::Completed,
+                };
+
+                if !filter.stages.contains(current_stage_flag) {
+                    return None;
+                }
+
+                // Create a new ActionStateResult for the matched operation
+                let rx = state_tx.subscribe();
+                Some(Box::new(NixActionStateResult {
+                    client_operation_id: op_id.clone(),
+                    action_info: action_info.clone(),
+                    state_rx: rx,
+                }) as Box<dyn ActionStateResult>)
+            })
+            .collect();
+
+        // Return a stream that yields all matches
+        Ok(Box::pin(stream::iter(matches)))
     }
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {

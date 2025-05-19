@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use nativelink_config::schedulers::NixProxySpec;
@@ -28,7 +28,9 @@ use nativelink_util::action_messages::{
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::instant_wrapper::MockInstantWrapped;
-use nativelink_util::operation_state_manager::ClientStateManager;
+use nativelink_util::operation_state_manager::{
+    ClientStateManager, OperationFilter, OperationStageFlags,
+};
 use nativelink_util::platform_properties::PlatformProperties;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
@@ -36,12 +38,12 @@ use uuid::Uuid;
 // Constants for testing
 const INSTANCE_NAME: &str = "test_instance";
 
-// Helper function to create a test action info
-fn create_test_action_info(digest: DigestInfo) -> Arc<ActionInfo> {
+// Helper function to create a test action info with a specific timeout
+fn create_test_action_info(digest: DigestInfo, timeout_secs: u64) -> Arc<ActionInfo> {
     Arc::new(ActionInfo {
         command_digest: DigestInfo::zero_digest(),
         input_root_digest: DigestInfo::zero_digest(),
-        timeout: std::time::Duration::from_secs(60),
+        timeout: Duration::from_secs(timeout_secs),
         platform_properties: HashMap::new(),
         priority: 0,
         load_timestamp: UNIX_EPOCH,
@@ -52,6 +54,11 @@ fn create_test_action_info(digest: DigestInfo) -> Arc<ActionInfo> {
             digest,
         }),
     })
+}
+
+// Helper function with default timeout of 60 seconds
+fn create_test_action_info_default_timeout(digest: DigestInfo) -> Arc<ActionInfo> {
+    create_test_action_info(digest, 60)
 }
 
 #[nativelink_test]
@@ -72,7 +79,7 @@ async fn test_nix_scheduler_immediate_completion() -> Result<(), Error> {
 
     // Create a test action
     let action_digest = DigestInfo::new([1u8; 32], 100);
-    let action_info = create_test_action_info(action_digest);
+    let action_info = create_test_action_info_default_timeout(action_digest);
     let client_operation_id = OperationId::default();
 
     // Add the action to the scheduler - it should return immediately with a completed result
@@ -97,8 +104,86 @@ async fn test_nix_scheduler_immediate_completion() -> Result<(), Error> {
 }
 
 #[nativelink_test]
-async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
+async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
     // Create a NixScheduler
+    let task_change_notify = Arc::new(Notify::new());
+    let awaited_action_db = memory_awaited_action_db_factory(
+        0,
+        &task_change_notify.clone(),
+        MockInstantWrapped::default,
+    );
+
+    let (scheduler, _worker_scheduler) = NixScheduler::new(
+        &NixProxySpec::default(),
+        awaited_action_db,
+        task_change_notify.clone(),
+    );
+
+    // Create a test action with a small timeout (500ms for test - long enough to avoid flakiness)
+    let action_digest = DigestInfo::new([2u8; 32], 100);
+    let action_info = create_test_action_info(action_digest, 1); // 1 second timeout
+    let client_operation_id = OperationId::default();
+
+    // Add the action to the scheduler
+    let mut action_result = scheduler
+        .add_action(client_operation_id.clone(), action_info.clone())
+        .await?;
+
+    // Verify the action is in running state
+    let state = action_result.as_state().await?;
+    match &state.stage {
+        ActionStage::Executing => {
+            // Expected state - action should be running
+        }
+        other => {
+            panic!("Expected ActionStage::Executing, got: {:?}", other);
+        }
+    }
+
+    // Should be able to find the action using filter_operations
+    let filter = OperationFilter {
+        operation_id: Some(client_operation_id.clone()),
+        stages: OperationStageFlags::Executing,
+        ..Default::default()
+    };
+
+    let mut filter_stream = scheduler.filter_operations(filter).await?;
+    let found_action = filter_stream.next().await;
+    assert!(
+        found_action.is_some(),
+        "Action should be found in filter results"
+    );
+
+    // Notify the scheduler to check for timeouts
+    task_change_notify.notify_one();
+
+    // Wait for the action to time out (give it a bit more than the timeout)
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Notify again to make sure the scheduler processes the timeout
+    task_change_notify.notify_one();
+
+    // Wait for state to change
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Check that the action has timed out
+    let state = action_result.as_state().await?;
+    match &state.stage {
+        ActionStage::Completed(result) => {
+            // Action should be completed with a timeout error
+            assert_eq!(result.exit_code, 124, "Expected timeout exit code 124");
+        }
+        other => {
+            panic!("Expected ActionStage::Completed, got: {:?}", other);
+        }
+    }
+
+    Ok(())
+}
+
+#[nativelink_test]
+async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
+    // Create a NixScheduler with no actions
     let task_change_notify = Arc::new(Notify::new());
     let awaited_action_db = memory_awaited_action_db_factory(
         0,
@@ -112,7 +197,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         task_change_notify,
     );
 
-    // Call filter_operations - it should return an empty stream
+    // Call filter_operations with no actions added - should return an empty stream
     let mut filter_stream = scheduler.filter_operations(Default::default()).await?;
 
     // Should not have any results in the stream
