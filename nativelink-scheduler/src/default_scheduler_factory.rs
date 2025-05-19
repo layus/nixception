@@ -170,6 +170,8 @@ fn nix_scheduler_factory(
         &task_change_notify.clone(),
         SystemTime::now,
     );
+    let _a = store_manager;
+    let _b = now_fn;
     let (action_scheduler, worker_scheduler) =
         NixScheduler::new(spec, awaited_action_db, task_change_notify);
     Ok((Some(action_scheduler), Some(worker_scheduler)))

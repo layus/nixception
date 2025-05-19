@@ -135,7 +135,7 @@ async fn test_nix_scheduler_worker_operations() -> Result<(), Error> {
         MockInstantWrapped::default,
     );
 
-    let (scheduler, worker_scheduler) = NixScheduler::new(
+    let (_scheduler, worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify,

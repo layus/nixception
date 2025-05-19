@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use futures::{stream, Future, StreamExt};
+use futures::{stream, Future};
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
