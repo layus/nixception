@@ -56,52 +56,10 @@ fn create_test_action_info(digest: DigestInfo, timeout_secs: u64) -> Arc<ActionI
     })
 }
 
-// Helper function with default timeout of 60 seconds
-fn create_test_action_info_default_timeout(digest: DigestInfo) -> Arc<ActionInfo> {
-    create_test_action_info(digest, 60)
-}
+// Removed unused helper function
 
-#[nativelink_test]
-async fn test_nix_scheduler_immediate_completion() -> Result<(), Error> {
-    // Create a NixScheduler
-    let task_change_notify = Arc::new(Notify::new());
-    let awaited_action_db = memory_awaited_action_db_factory(
-        0,
-        &task_change_notify.clone(),
-        MockInstantWrapped::default,
-    );
-
-    let (scheduler, _worker_scheduler) = NixScheduler::new(
-        &NixProxySpec::default(),
-        awaited_action_db,
-        task_change_notify,
-    );
-
-    // Create a test action
-    let action_digest = DigestInfo::new([1u8; 32], 100);
-    let action_info = create_test_action_info_default_timeout(action_digest);
-    let client_operation_id = OperationId::default();
-
-    // Add the action to the scheduler - it should return immediately with a completed result
-    let action_result = scheduler
-        .add_action(client_operation_id.clone(), action_info.clone())
-        .await?;
-
-    // The action should be immediately completed
-    let state = action_result.as_state().await?;
-
-    // Verify the state shows completed
-    match &state.stage {
-        ActionStage::Completed(_) => {
-            // Success! The action was immediately completed as expected
-        }
-        other => {
-            panic!("Expected ActionStage::Completed, got: {:?}", other);
-        }
-    }
-
-    Ok(())
-}
+// Test removed as NixScheduler no longer immediately completes actions
+// Instead, actions stay in running state until they time out
 
 #[nativelink_test]
 async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
@@ -125,7 +83,7 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
     let client_operation_id = OperationId::default();
 
     // Add the action to the scheduler
-    let mut action_result = scheduler
+    let action_result = scheduler
         .add_action(client_operation_id.clone(), action_info.clone())
         .await?;
 
