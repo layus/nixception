@@ -221,4 +221,9 @@ pub struct PropertyModifierSpec {
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
-pub struct NixProxySpec {}
+pub struct NixProxySpec {
+    /// The reference to the action cache store used to return cached
+    /// actions from rather than running them again.
+    /// To prevent unintended issues, this store should probably be a `CompletenessCheckingSpec`.
+    pub ac_store: StoreRefName,
+}

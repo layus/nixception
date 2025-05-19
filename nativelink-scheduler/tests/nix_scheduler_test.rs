@@ -18,10 +18,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use nativelink_config::schedulers::NixProxySpec;
+use nativelink_config::stores::MemorySpec;
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
 use nativelink_scheduler::nix_scheduler::NixScheduler;
+use nativelink_store::memory_store::MemoryStore;
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, OperationId, WorkerId,
 };
@@ -32,6 +34,7 @@ use nativelink_util::operation_state_manager::{
     ClientStateManager, OperationFilter, OperationStageFlags,
 };
 use nativelink_util::platform_properties::PlatformProperties;
+use nativelink_util::store_trait::Store;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
@@ -71,10 +74,12 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         MockInstantWrapped::default,
     );
 
+    let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify.clone(),
+        ac_store,
     );
 
     // Create a test action with a small timeout (500ms for test - long enough to avoid flakiness)
@@ -148,11 +153,13 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         &task_change_notify.clone(),
         MockInstantWrapped::default,
     );
+    let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
 
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify,
+        ac_store,
     );
 
     // Call filter_operations with no actions added - should return an empty stream
@@ -177,11 +184,13 @@ async fn test_nix_scheduler_worker_operations() -> Result<(), Error> {
         &task_change_notify.clone(),
         MockInstantWrapped::default,
     );
+    let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
 
     let (_scheduler, worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify,
+        ac_store,
     );
 
     // Create a worker
