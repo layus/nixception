@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
+
 
 use async_trait::async_trait;
 use futures::{stream, Future};
@@ -76,7 +76,7 @@ impl ActionStateResult for NixActionStateResult {
 
 /// A simplified Nix scheduler that simulates running actions until timeout
 #[derive(MetricsComponent)]
-pub struct NixScheduler {
+pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> {
     /// Platform property manager
     #[metric(group = "platform_properties")]
     platform_property_manager: Arc<PlatformPropertyManager>,
@@ -89,16 +89,20 @@ pub struct NixScheduler {
     #[allow(dead_code)]
     ac_store: Store,
 
+    /// Function to get the current time
+    now_fn: NowFn,
+
     /// Nix executor for handling tasks
     #[allow(dead_code)]
     nix_executor: Arc<NixExecutor>,
 }
 
-impl NixScheduler {
+impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> NixScheduler<I, NowFn> {
     pub fn new<A: AwaitedActionDb>(
         _spec: &NixProxySpec,
         _awaited_action_db: A,
         task_change_notify: Arc<Notify>,
+        now_fn: NowFn,
         ac_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         Self::new_with_callback(
@@ -106,7 +110,7 @@ impl NixScheduler {
             _awaited_action_db,
             || async move {},
             task_change_notify,
-            SystemTime::now,
+            now_fn,
             ac_store,
         )
     }
@@ -115,14 +119,12 @@ impl NixScheduler {
         Fut: Future<Output = ()> + Send,
         F: Fn() -> Fut + Send + Sync + 'static,
         A: AwaitedActionDb,
-        I: InstantWrapper,
-        NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static,
     >(
         _spec: &NixProxySpec,
         _awaited_action_db: A,
         _on_matching_engine_run: F,
         task_change_notify: Arc<Notify>,
-        _now_fn: NowFn,
+        now_fn: NowFn,
         ac_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
@@ -153,6 +155,7 @@ impl NixScheduler {
                 platform_property_manager,
                 active_actions,
                 ac_store,
+                now_fn: now_fn.clone(),
                 nix_executor,
             }
         });
@@ -165,6 +168,9 @@ impl NixScheduler {
         client_operation_id: OperationId,
         action_info: Arc<ActionInfo>,
     ) -> Box<dyn ActionStateResult> {
+        // Get current time using now_fn
+        let _now = (self.now_fn)();
+        
         // Create a running action state
         let action_digest = action_info.digest();
         let running_state = Arc::new(ActionState {
@@ -195,7 +201,7 @@ impl NixScheduler {
             platform_props = ?action_info.platform_properties,
             priority = ?action_info.priority,
             qualifier = ?action_info.unique_qualifier,
-            "NixScheduler: Received action with detailed info (will timeout)"
+            "NixScheduler: Received action with detailed info (will timeout) at current time"
         );
 
         Box::new(NixActionStateResult {
@@ -207,7 +213,7 @@ impl NixScheduler {
 }
 
 #[async_trait]
-impl ClientStateManager for NixScheduler {
+impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> ClientStateManager for NixScheduler<I, NowFn> {
     async fn add_action(
         &self,
         client_operation_id: OperationId,
@@ -277,7 +283,7 @@ impl ClientStateManager for NixScheduler {
 }
 
 #[async_trait]
-impl KnownPlatformPropertyProvider for NixScheduler {
+impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> KnownPlatformPropertyProvider for NixScheduler<I, NowFn> {
     async fn get_known_properties(&self, _instance_name: &str) -> Result<Vec<String>, Error> {
         Ok(self
             .platform_property_manager
@@ -373,5 +379,5 @@ impl WorkerScheduler for NixWorkerScheduler {
     }
 }
 
-impl RootMetricsComponent for NixScheduler {}
+impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> RootMetricsComponent for NixScheduler<I, NowFn> {}
 impl RootMetricsComponent for NixWorkerScheduler {}
