@@ -48,87 +48,10 @@ impl NixExecutor {
         task_change_notify: Arc<Notify>,
         ac_store: Store,
     ) -> Self {
-        let active_actions_clone = active_actions.clone();
-
-        let task_monitoring_handle = spawn!("nix_executor_task_monitoring", async move {
-            // Monitor active actions for timeouts
-            loop {
-                match task_change_notify.notified().await {
-                    () => {
-                        // Sleep a bit then check for timeouts
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-
-                        // Lock the actions
-                        let actions = active_actions_clone.lock().await;
-
-                        // Find actions that have timed out
-                        let now = SystemTime::now();
-                        let timed_out: Vec<_> = actions
-                            .iter()
-                            .filter_map(|(op_id, (action_info, _state_tx))| {
-                                let start_time = SystemTime::now()
-                                    .checked_sub(Duration::from_secs(10))
-                                    .unwrap_or(SystemTime::now());
-                                let timeout_duration = action_info.timeout;
-
-                                match now.duration_since(start_time) {
-                                    Ok(elapsed) if elapsed > timeout_duration => {
-                                        Some(op_id.clone())
-                                    }
-                                    _ => None,
-                                }
-                            })
-                            .collect();
-
-                        // Update the timed out actions
-                        for op_id in &timed_out {
-                            if let Some((action_info, state_tx)) = actions.get(op_id) {
-                                // We don't need to retrieve the action command info here
-                                let action_digest = action_info.digest();
-
-                                // Create timeout error message
-                                let mut result = ActionResult::default();
-                                result.exit_code = 124; // Timeout exit code
-                                result.message = "Action timed out".to_string();
-                                result.stderr_digest = DigestInfo::zero_digest();
-
-                                // Update the state
-                                let new_state = Arc::new(ActionState {
-                                    client_operation_id: op_id.clone(),
-                                    stage: ActionStage::Completed(result),
-                                    action_digest,
-                                });
-
-                                let _ = state_tx.send(new_state);
-
-                                event!(
-                                    Level::INFO,
-                                    ?op_id,
-                                    ?action_digest,
-                                    command_digest = ?action_info.command_digest,
-                                    input_root_digest = ?action_info.input_root_digest,
-                                    timeout_secs = ?action_info.timeout.as_secs(),
-                                    platform_props = ?action_info.platform_properties,
-                                    "NixExecutor: Action timed out after {}s",
-                                    action_info.timeout.as_secs()
-                                );
-                            }
-                        }
-
-                        // Remove timed out actions after a small delay to allow clients to see the completed state
-                        let timed_out_vec = timed_out.clone();
-                        let actions_clone = active_actions_clone.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            let mut actions = actions_clone.lock().await;
-                            for op_id in timed_out_vec {
-                                actions.remove(&op_id);
-                            }
-                        });
-                    }
-                }
-            }
-        });
+        let task_monitoring_handle = spawn!(
+            "nix_executor_task_monitoring",
+            Self::monitor_tasks(active_actions.clone(), task_change_notify)
+        );
 
         event!(Level::INFO, "NixExecutor: Initialized");
 
@@ -151,3 +74,97 @@ impl NixExecutor {
 }
 
 impl RootMetricsComponent for NixExecutor {}
+
+// Private methods
+impl NixExecutor {
+
+    /// Monitors tasks for timeouts in a background task
+    async fn monitor_tasks(
+        active_actions: Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
+        task_change_notify: Arc<Notify>,
+    ) {
+        // Monitor active actions for timeouts
+        loop {
+            match task_change_notify.notified().await {
+                () => {
+                    // Sleep a bit then check for timeouts
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+
+                    // Lock the actions
+                    let actions = active_actions.lock().await;
+
+                    // Find actions that have timed out
+                    let now = SystemTime::now();
+                    let timed_out: Vec<_> = actions
+                        .iter()
+                        .filter_map(|(op_id, (action_info, _state_tx))| {
+                            let start_time = SystemTime::now()
+                                .checked_sub(Duration::from_secs(10))
+                                .unwrap_or(SystemTime::now());
+                            let timeout_duration = action_info.timeout;
+
+                            match now.duration_since(start_time) {
+                                Ok(elapsed) if elapsed > timeout_duration => {
+                                    Some(op_id.clone())
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+
+                    // Update the timed out actions
+                    for op_id in &timed_out {
+                        if let Some((action_info, state_tx)) = actions.get(op_id) {
+                            // We don't need to retrieve the action command info here
+                            let action_digest = action_info.digest();
+
+                            // Create timeout error message
+                            let mut result = ActionResult::default();
+                            result.exit_code = 124; // Timeout exit code
+                            result.message = "Action timed out".to_string();
+                            result.stderr_digest = DigestInfo::zero_digest();
+
+                            // Update the state
+                            let new_state = Arc::new(ActionState {
+                                client_operation_id: op_id.clone(),
+                                stage: ActionStage::Completed(result),
+                                action_digest,
+                            });
+
+                            let _ = state_tx.send(new_state);
+
+                            event!(
+                                Level::INFO,
+                                ?op_id,
+                                ?action_digest,
+                                command_digest = ?action_info.command_digest,
+                                input_root_digest = ?action_info.input_root_digest,
+                                timeout_secs = ?action_info.timeout.as_secs(),
+                                platform_props = ?action_info.platform_properties,
+                                "NixExecutor: Action timed out after {}s",
+                                action_info.timeout.as_secs()
+                            );
+                        }
+                    }
+
+                    // Remove timed out actions after a small delay to allow clients to see the completed state
+                    Self::remove_timed_out_actions_with_delay(active_actions.clone(), timed_out.clone()).await;
+                }
+            }
+        }
+    }
+
+    /// Removes timed out actions after a delay
+    async fn remove_timed_out_actions_with_delay(
+        active_actions: Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
+        timed_out: Vec<OperationId>,
+    ) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let mut actions = active_actions.lock().await;
+            for op_id in timed_out {
+                actions.remove(&op_id);
+            }
+        });
+    }
+}
