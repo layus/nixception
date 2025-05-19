@@ -18,26 +18,24 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use futures::{stream, Future};
-use nativelink_util::common::DigestInfo;
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_util::action_messages::{
-    ActionInfo, ActionResult, ActionStage, ActionState, OperationId, WorkerId,
+    ActionInfo, ActionStage, ActionState, OperationId, WorkerId,
 };
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
-    ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter, OperationStageFlags,
-    UpdateOperationType,
+    ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
+    OperationStageFlags, UpdateOperationType,
 };
-use nativelink_util::spawn;
-use nativelink_util::task::JoinHandleDropGuard;
+use nativelink_util::store_trait::Store;
 use tokio::sync::{watch, Mutex as TokioMutex, Notify};
-use tokio::time::Duration;
 use tracing::{event, Level};
 
 use crate::awaited_action_db::AwaitedActionDb;
+use crate::nix_worker::NixExecutor;
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
@@ -60,12 +58,12 @@ impl ActionStateResult for NixActionStateResult {
     async fn changed(&mut self) -> Result<Arc<ActionState>, Error> {
         // Wait for the state to change
         if self.state_rx.changed().await.is_ok() {
-            let mut state = self.state_rx.borrow().clone();
+            let mut state = self.state_rx.borrow_and_update().clone();
             Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
             Ok(state)
         } else {
             // Channel closed
-            let mut state = self.state_rx.borrow().clone();
+            let mut state = self.state_rx.borrow_and_update().clone();
             Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
             Ok(state)
         }
@@ -84,10 +82,16 @@ pub struct NixScheduler {
     platform_property_manager: Arc<PlatformPropertyManager>,
 
     /// All active actions (operation_id -> action state channel sender)
-    active_actions: Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
+    active_actions:
+        Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
 
-    /// Background task to make sure our scheduler is properly cleaned up
-    _task_worker_matching_spawn: JoinHandleDropGuard<()>,
+    /// Store manager for accessing content
+    #[allow(dead_code)]
+    ac_store: Store,
+
+    /// Nix executor for handling tasks
+    #[allow(dead_code)]
+    nix_executor: Arc<NixExecutor>,
 }
 
 impl NixScheduler {
@@ -95,6 +99,7 @@ impl NixScheduler {
         _spec: &NixProxySpec,
         _awaited_action_db: A,
         task_change_notify: Arc<Notify>,
+        ac_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         Self::new_with_callback(
             _spec,
@@ -102,6 +107,7 @@ impl NixScheduler {
             || async move {},
             task_change_notify,
             SystemTime::now,
+            ac_store,
         )
     }
 
@@ -117,11 +123,11 @@ impl NixScheduler {
         _on_matching_engine_run: F,
         task_change_notify: Arc<Notify>,
         _now_fn: NowFn,
+        ac_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
 
         // Create a Nix worker scheduler
-        //let (_tx, _rx) = mpsc::unbounded_channel::<String>();
         let worker_scheduler = Arc::new(NixWorkerScheduler {
             platform_property_manager: platform_property_manager.clone(),
         });
@@ -129,88 +135,25 @@ impl NixScheduler {
         let worker_scheduler_clone = worker_scheduler.clone();
 
         let action_scheduler = Arc::new_cyclic(move |_weak_self| -> Self {
-            let active_actions = Arc::new(TokioMutex::new(HashMap::<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>::new()));
-            let active_actions_clone = active_actions.clone();
+            let active_actions = Arc::new(TokioMutex::new(HashMap::<
+                OperationId,
+                (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>),
+            >::new()));
 
-            let task_worker_matching_spawn =
-                spawn!("nix_scheduler_task_worker_matching", async move {
-                    // Monitor active actions for timeouts
-                    loop {
-                        match task_change_notify.notified().await {
-                            () => {
-                                // Sleep a bit then check for timeouts
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-
-                                // Lock the actions
-                                let actions = active_actions_clone.lock().await;
-
-                                // Find actions that have timed out
-                                let now = SystemTime::now();
-                                let timed_out: Vec<_> = actions
-                                    .iter()
-                                    .filter_map(|(op_id, (action_info, _state_tx))| {
-                                        let start_time = SystemTime::now().checked_sub(Duration::from_secs(10)).unwrap_or(SystemTime::now());
-                                        let timeout_duration = action_info.timeout;
-
-                                        match now.duration_since(start_time) {
-                                            Ok(elapsed) if elapsed > timeout_duration => {
-                                                Some(op_id.clone())
-                                            }
-                                            _ => None,
-                                        }
-                                    })
-                                    .collect();
-
-                                // Update the timed out actions
-                                for op_id in &timed_out {
-                                    if let Some((action_info, state_tx)) = actions.get(op_id) {
-                                        let action_digest = action_info.digest();
-
-                                        // Create timeout error message
-                                        let mut result = ActionResult::default();
-                                        result.exit_code = 124; // Timeout exit code
-                                        result.message = "Action timed out".to_string();
-                                        result.stderr_digest = DigestInfo::zero_digest();
-
-                                        // Update the state
-                                        let new_state = Arc::new(ActionState {
-                                            client_operation_id: op_id.clone(),
-                                            stage: ActionStage::Completed(result),
-                                            action_digest,
-                                        });
-
-                                        let _ = state_tx.send(new_state);
-
-                                        event!(
-                                            Level::INFO,
-                                            ?op_id,
-                                            ?action_digest,
-                                            "NixScheduler: Action timed out"
-                                        );
-                                    }
-                                }
-
-                                // Remove timed out actions after a small delay to allow clients to see the completed state
-                                let timed_out_vec = timed_out.clone();
-                                let actions_clone = active_actions_clone.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
-                                    let mut actions = actions_clone.lock().await;
-                                    for op_id in timed_out_vec {
-                                        actions.remove(&op_id);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                });
+            // Create the Nix executor which will monitor tasks
+            let nix_executor = Arc::new(NixExecutor::new(
+                active_actions.clone(),
+                task_change_notify.clone(),
+                ac_store.clone(),
+            ));
 
             event!(Level::INFO, "NixScheduler: Initialized");
 
             NixScheduler {
                 platform_property_manager,
                 active_actions,
-                _task_worker_matching_spawn: task_worker_matching_spawn,
+                ac_store,
+                nix_executor,
             }
         });
 
@@ -239,11 +182,20 @@ impl NixScheduler {
             actions.insert(client_operation_id.clone(), (action_info.clone(), tx));
         }
 
+        // Log detailed information about the received action
+        // Note: In a production environment, we could use the ac_store (currently just storing the name: {})
+        // to fetch and log the actual command details using the command_digest
         event!(
             Level::INFO,
             ?client_operation_id,
             ?action_digest,
-            "NixScheduler: Starting action execution (will timeout)"
+            command_digest = ?action_info.command_digest,
+            input_root_digest = ?action_info.input_root_digest,
+            timeout_secs = ?action_info.timeout.as_secs(),
+            platform_props = ?action_info.platform_properties,
+            priority = ?action_info.priority,
+            qualifier = ?action_info.unique_qualifier,
+            "NixScheduler: Received action with detailed info (will timeout)"
         );
 
         Box::new(NixActionStateResult {
