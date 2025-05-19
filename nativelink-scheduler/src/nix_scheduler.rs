@@ -18,7 +18,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use futures::{stream, Future, StreamExt};
 use nativelink_config::schedulers::NixProxySpec;
-use nativelink_error::{Error, ResultExt};
+use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
 use nativelink_util::action_messages::{
     ActionInfo, ActionResult, ActionStage, ActionState, OperationId, WorkerId,
@@ -31,7 +31,7 @@ use nativelink_util::operation_state_manager::{
 };
 use nativelink_util::spawn;
 use nativelink_util::task::JoinHandleDropGuard;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{watch, Notify};
 use tokio::time::Duration;
 use tracing::{event, Level};
 
