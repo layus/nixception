@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::fmt::Debug;
 use core::future::Future;
 use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,12 +21,16 @@ use mock_instant::thread_local::{Instant as MockInstant, MockClock};
 
 /// Wrapper used to abstract away which underlying Instant impl we are using.
 /// This is needed for testing.
-pub trait InstantWrapper: Send + Sync + Unpin + 'static {
+pub trait InstantWrapper:
+    Eq + PartialEq + Ord + PartialOrd + Send + Sync + Unpin + Debug + 'static
+{
     fn from_secs(secs: u64) -> Self;
     fn unix_timestamp(&self) -> u64;
     fn now(&self) -> SystemTime;
     fn elapsed(&self) -> Duration;
     fn sleep(self, duration: Duration) -> impl Future<Output = ()> + Send + Sync + 'static;
+    fn add(self, duration: Duration) -> Self;
+    fn saturating_duration_since(&self, other: &Self) -> Duration;
 }
 
 impl InstantWrapper for SystemTime {
@@ -49,6 +54,14 @@ impl InstantWrapper for SystemTime {
 
     async fn sleep(self, duration: Duration) {
         tokio::time::sleep(duration).await;
+    }
+
+    fn add(self, duration: Duration) -> Self {
+        self + duration
+    }
+
+    fn saturating_duration_since(&self, other: &Self) -> Duration {
+        self.duration_since(*other).unwrap_or(Duration::ZERO)
     }
 }
 
@@ -91,5 +104,13 @@ impl InstantWrapper for MockInstantWrapped {
                 break;
             }
         }
+    }
+
+    fn add(self, duration: Duration) -> Self {
+        MockInstantWrapped(self.0 + duration)
+    }
+
+    fn saturating_duration_since(&self, other: &Self) -> Duration {
+        self.0.saturating_duration_since(other.0)
     }
 }

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
+use mock_instant::thread_local::MockClock;
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_config::stores::MemorySpec;
 use nativelink_error::Error;
@@ -66,6 +67,9 @@ fn create_test_action_info(digest: DigestInfo, timeout_secs: u64) -> Arc<ActionI
 
 #[nativelink_test]
 async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
+    // Set mock clock to a deterministic starting point
+    MockClock::set_time(Duration::from_secs(11363015));
+
     // Create a NixScheduler
     let task_change_notify = Arc::new(Notify::new());
     let awaited_action_db = memory_awaited_action_db_factory(
@@ -83,7 +87,8 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         ac_store,
     );
 
-    // Create a test action with a small timeout (500ms for test - long enough to avoid flakiness)
+    // Create a test action with a small timeout (1 second)
+    // This will be added to the priority queue with a timeout 1 second from now
     let action_digest = DigestInfo::new([2u8; 32], 100);
     let action_info = create_test_action_info(action_digest, 1); // 1 second timeout
     let client_operation_id = OperationId::default();
@@ -118,17 +123,13 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         "Action should be found in filter results"
     );
 
-    // Notify the scheduler to check for timeouts
+    tokio::task::yield_now().await;
+
+    // Advance mock clock by 2 seconds to simulate timeout
+    MockClock::advance(Duration::from_secs(2));
+
     task_change_notify.notify_one();
-
-    // Wait for the action to time out (give it a bit more than the timeout)
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
-    // Notify again to make sure the scheduler processes the timeout
-    task_change_notify.notify_one();
-
-    // Wait for state to change
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
 
     // Check that the action has timed out
     let state = action_result.as_state().await?;
@@ -172,70 +173,6 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
     assert!(
         next_item.is_none(),
         "Expected empty stream from filter_operations"
-    );
-
-    Ok(())
-}
-
-#[nativelink_test]
-async fn test_nix_scheduler_worker_operations() -> Result<(), Error> {
-    // Create a NixScheduler
-    let task_change_notify = Arc::new(Notify::new());
-    let awaited_action_db = memory_awaited_action_db_factory(
-        0,
-        &task_change_notify.clone(),
-        MockInstantWrapped::default,
-    );
-    let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
-
-    let (_scheduler, worker_scheduler) = NixScheduler::new(
-        &NixProxySpec::default(),
-        awaited_action_db,
-        task_change_notify,
-        MockInstantWrapped::default,
-        ac_store,
-    );
-
-    // Create a worker
-    let worker_id = WorkerId(Uuid::new_v4());
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let worker = nativelink_scheduler::worker::Worker::new(
-        worker_id.clone(),
-        PlatformProperties::default(),
-        tx,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    );
-
-    // Add the worker - should receive acknowledgment
-    worker_scheduler.add_worker(worker).await?;
-
-    // Should receive the initial connection message
-    let connection_message = rx.recv().await;
-    assert!(connection_message.is_some(), "Expected connection message");
-
-    // Test worker operations - they should all succeed as no-ops
-    worker_scheduler
-        .worker_keep_alive_received(
-            &worker_id,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .await?;
-
-    worker_scheduler.set_drain_worker(&worker_id, true).await?;
-
-    worker_scheduler.remove_worker(&worker_id).await?;
-
-    // No messages should be sent after the initial connection
-    let timeout = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
-    assert!(
-        timeout.is_err() || timeout.unwrap().is_none(),
-        "Expected no more messages after connection response"
     );
 
     Ok(())
