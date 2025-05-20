@@ -64,9 +64,10 @@ impl ActionStateResult for NixActionStateResult {
             Ok(state)
         } else {
             // Channel closed
-            let mut state = self.state_rx.borrow_and_update().clone();
-            Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
-            Ok(state)
+            Err(nativelink_error::make_err!(
+                nativelink_error::Code::Internal,
+                "NixActionStateResult: cahnged() failed, channel closed"
+            ))
         }
     }
 
