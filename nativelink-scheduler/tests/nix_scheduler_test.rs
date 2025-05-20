@@ -26,7 +26,7 @@ use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_fa
 use nativelink_scheduler::nix_scheduler::NixScheduler;
 use nativelink_store::memory_store::MemoryStore;
 use nativelink_util::action_messages::{
-    ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, OperationId, WorkerId,
+    ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, OperationId,
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
@@ -34,10 +34,8 @@ use nativelink_util::instant_wrapper::MockInstantWrapped;
 use nativelink_util::operation_state_manager::{
     ClientStateManager, OperationFilter, OperationStageFlags,
 };
-use nativelink_util::platform_properties::PlatformProperties;
 use nativelink_util::store_trait::Store;
-use tokio::sync::{mpsc, Notify};
-use uuid::Uuid;
+use tokio::sync::Notify;
 
 // Constants for testing
 const INSTANCE_NAME: &str = "test_instance";

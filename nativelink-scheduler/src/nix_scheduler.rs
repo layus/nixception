@@ -15,10 +15,10 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{stream, Future, StreamExt};
+use futures::{stream, Future};
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
