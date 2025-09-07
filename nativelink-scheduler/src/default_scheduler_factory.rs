@@ -88,7 +88,7 @@ fn inner_scheduler_factory(
             ));
             (Some(property_modifier_scheduler), worker_scheduler)
         }
-        SchedulerSpec::nix_proxy(spec) => {
+        SchedulerSpec::NixProxy(spec) => {
             nix_scheduler_factory(spec, store_manager, SystemTime::now)?
         }
     };

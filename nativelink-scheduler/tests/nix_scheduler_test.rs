@@ -50,7 +50,7 @@ fn create_test_action_info(digest: DigestInfo, timeout_secs: u64) -> Arc<ActionI
         priority: 0,
         load_timestamp: UNIX_EPOCH,
         insert_timestamp: SystemTime::now(),
-        unique_qualifier: ActionUniqueQualifier::Cachable(ActionUniqueKey {
+        unique_qualifier: ActionUniqueQualifier::Cacheable(ActionUniqueKey {
             instance_name: INSTANCE_NAME.to_string(),
             digest_function: DigestHasherFunc::Sha256,
             digest,
@@ -97,7 +97,7 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         .await?;
 
     // Verify the action is in running state
-    let state = action_result.as_state().await?;
+    let (state, _) = action_result.as_state().await?;
     match &state.stage {
         ActionStage::Executing => {
             // Expected state - action should be running
@@ -130,7 +130,7 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
     tokio::task::yield_now().await;
 
     // Check that the action has timed out
-    let state = action_result.as_state().await?;
+    let (state, _) = action_result.as_state().await?;
     match &state.stage {
         ActionStage::Completed(result) => {
             // Action should be completed with a timeout error

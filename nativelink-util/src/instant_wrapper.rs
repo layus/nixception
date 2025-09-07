@@ -70,7 +70,7 @@ pub fn default_instant_wrapper() -> impl InstantWrapper {
 }
 
 /// Our mocked out instant that we can pass to our `EvictionMap`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct MockInstantWrapped(MockInstant);
 
 impl Default for MockInstantWrapped {

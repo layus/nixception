@@ -31,7 +31,9 @@ use nativelink_util::operation_state_manager::{
     ActionStateResult, ActionStateResultStream, ClientStateManager, OperationFilter,
     OperationStageFlags, UpdateOperationType,
 };
+use nativelink_util::origin_event::OriginMetadata;
 use nativelink_util::store_trait::Store;
+use nativelink_util::shutdown_guard::ShutdownGuard;
 use tokio::sync::{watch, Mutex as TokioMutex, Notify};
 use tokio::time;
 use tracing::{event, Level};
@@ -50,29 +52,29 @@ struct NixActionStateResult {
 
 #[async_trait]
 impl ActionStateResult for NixActionStateResult {
-    async fn as_state(&self) -> Result<Arc<ActionState>, Error> {
+    async fn as_state(&self) -> Result<(Arc<ActionState>, Option<OriginMetadata>), Error> {
         let mut state = self.state_rx.borrow().clone();
         Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
-        Ok(state)
+        Ok((state, None))
     }
 
-    async fn changed(&mut self) -> Result<Arc<ActionState>, Error> {
+    async fn changed(&mut self) -> Result<(Arc<ActionState>, Option<OriginMetadata>), Error> {
         // Wait for the state to change
         if self.state_rx.changed().await.is_ok() {
             let mut state = self.state_rx.borrow_and_update().clone();
             Arc::make_mut(&mut state).client_operation_id = self.client_operation_id.clone();
-            Ok(state)
+            Ok((state, None))
         } else {
             // Channel closed
             Err(nativelink_error::make_err!(
                 nativelink_error::Code::Internal,
-                "NixActionStateResult: cahnged() failed, channel closed"
+                "NixActionStateResult: changed() failed, channel closed"
             ))
         }
     }
 
-    async fn as_action_info(&self) -> Result<Arc<ActionInfo>, Error> {
-        Ok(self.action_info.clone())
+    async fn as_action_info(&self) -> Result<(Arc<ActionInfo>, Option<OriginMetadata>), Error> {
+        Ok((self.action_info.clone(), None))
     }
 }
 
@@ -271,7 +273,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                     });
 
                     // Send the update
-                    let _ = state_tx.send(completed_state);
+                    state_tx.send(completed_state).unwrap();
 
                     event!(
                         Level::INFO,
@@ -369,7 +371,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         let actions = self.active_actions.lock().await;
 
         // Apply filters
-        let matches: Vec<_> = actions
+        let matches: Vec<Box<dyn ActionStateResult + 'static>> = actions
             .iter()
             .filter_map(|(op_id, (action_info, state_tx))| {
                 // Filter by operation_id if specified
@@ -401,11 +403,10 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                     action_info: action_info.clone(),
                     state_rx: rx,
                 }) as Box<dyn ActionStateResult>)
-            })
-            .collect();
+            }).collect();
 
         // Return a stream that yields all matches
-        Ok(Box::pin(stream::iter(matches)))
+        Ok(Box::pin(stream::iter(matches.into_iter())))
     }
 
     fn as_known_platform_property_provider(&self) -> Option<&dyn KnownPlatformPropertyProvider> {
@@ -508,6 +509,20 @@ impl WorkerScheduler for NixWorkerScheduler {
             ?is_draining,
             "NixWorkerScheduler: Setting worker drain status (no-op)"
         );
+        Ok(())
+    }
+
+    async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
+    }
+
+    async fn notify_complete(
+        &self,
+        worker_id: &WorkerId,
+        operation_id: &OperationId,
+    ) -> Result<(), Error> {
+        // self.worker_scheduler
+        //     .notify_complete(worker_id, operation_id)
+        //     .await
         Ok(())
     }
 }
