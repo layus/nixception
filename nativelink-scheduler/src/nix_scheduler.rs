@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{stream, Future};
+use futures::{Future, stream};
 use nativelink_config::schedulers::NixProxySpec;
 use nativelink_error::Error;
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
@@ -32,11 +32,11 @@ use nativelink_util::operation_state_manager::{
     OperationStageFlags, UpdateOperationType,
 };
 use nativelink_util::origin_event::OriginMetadata;
-use nativelink_util::store_trait::Store;
 use nativelink_util::shutdown_guard::ShutdownGuard;
-use tokio::sync::{watch, Mutex as TokioMutex, Notify};
+use nativelink_util::store_trait::Store;
+use tokio::sync::{Mutex as TokioMutex, Notify, watch};
 use tokio::time;
-use tracing::{event, Level};
+use tracing::{Level, event};
 
 use crate::awaited_action_db::AwaitedActionDb;
 use crate::platform_property_manager::PlatformPropertyManager;
@@ -79,7 +79,7 @@ impl ActionStateResult for NixActionStateResult {
 }
 
 /// A simplified Nix scheduler that simulates running actions until timeout
-#[derive(MetricsComponent)]
+#[derive(MetricsComponent, Debug)]
 pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>
 {
     /// Platform property manager
@@ -105,7 +105,7 @@ pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unp
 }
 
 // Struct to represent an action in the timeout priority queue
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TimeoutEntry<I: InstantWrapper> {
     // The time when this action will timeout
     timeout_time: I,
@@ -326,6 +326,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             Level::INFO,
             ?client_operation_id,
             ?action_digest,
+            ?action_info,
             //command_digest = ?action_info.command_digest,
             //input_root_digest = ?action_info.input_root_digest,
             timeout_secs = ?action_info.timeout.as_secs(),
@@ -371,7 +372,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         let actions = self.active_actions.lock().await;
 
         // Apply filters
-        let matches: Vec<Box<dyn ActionStateResult + 'static>> = actions
+        let matches = actions
             .iter()
             .filter_map(|(op_id, (action_info, state_tx))| {
                 // Filter by operation_id if specified
@@ -398,12 +399,14 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
                 // Create a new ActionStateResult for the matched operation
                 let rx = state_tx.subscribe();
-                Some(Box::new(NixActionStateResult {
+                let result: Box<dyn ActionStateResult> = Box::new(NixActionStateResult {
                     client_operation_id: op_id.clone(),
                     action_info: action_info.clone(),
                     state_rx: rx,
-                }) as Box<dyn ActionStateResult>)
-            }).collect();
+                });
+                Some(result)
+            })
+            .collect::<Vec<_>>();
 
         // Return a stream that yields all matches
         Ok(Box::pin(stream::iter(matches.into_iter())))
@@ -512,13 +515,12 @@ impl WorkerScheduler for NixWorkerScheduler {
         Ok(())
     }
 
-    async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
-    }
+    async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {}
 
     async fn notify_complete(
         &self,
-        worker_id: &WorkerId,
-        operation_id: &OperationId,
+        _worker_id: &WorkerId,
+        _operation_id: &OperationId,
     ) -> Result<(), Error> {
         // self.worker_scheduler
         //     .notify_complete(worker_id, operation_id)
@@ -531,4 +533,5 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
     RootMetricsComponent for NixScheduler<I, NowFn>
 {
 }
+
 impl RootMetricsComponent for NixWorkerScheduler {}
