@@ -226,4 +226,7 @@ pub struct NixProxySpec {
     /// actions from rather than running them again.
     /// To prevent unintended issues, this store should probably be a `CompletenessCheckingSpec`.
     pub ac_store: StoreRefName,
+
+    /// CAS!
+    pub cas_store: StoreRefName,
 }

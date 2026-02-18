@@ -173,8 +173,17 @@ fn nix_scheduler_factory(
     let ac_store = store_manager
         .get_store(&spec.ac_store)
         .err_tip(|| format!("'ac_store': '{}' does not exist", spec.ac_store))?;
-    let (action_scheduler, worker_scheduler) =
-        NixScheduler::new(spec, awaited_action_db, task_change_notify, now_fn, ac_store);
+    let cas_store = store_manager
+        .get_store(&spec.cas_store)
+        .err_tip(|| format!("'cas_store': '{}' does not exist", spec.cas_store))?;
+    let (action_scheduler, worker_scheduler) = NixScheduler::new(
+        spec,
+        awaited_action_db,
+        task_change_notify,
+        now_fn,
+        ac_store,
+        cas_store,
+    );
     Ok((Some(action_scheduler), Some(worker_scheduler)))
 }
 

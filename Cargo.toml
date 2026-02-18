@@ -67,6 +67,8 @@ tonic = { version = "0.13.0", features = [
 ], default-features = false }
 tower = { version = "0.5.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
+#jsonwebtoken = { version = "10.2.0", features = ["aws_lc_rs"] }
+gcloud-auth = { version = "1.2.0", features = ["jwt-aws-lc-rs"] }
 
 [workspace.cargo-features-manager.keep]
 async-lock = ["std"]

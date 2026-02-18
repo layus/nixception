@@ -35,6 +35,7 @@ common --@rules_python//python/config_settings:py_linux_libc=musl
 build --incompatible_strict_action_env
 
 # Don't use legacy repository rules.
+# And yet we do use them ?!
 build --incompatible_disable_native_repo_rules
 
 # Use the earliest supported C++ version for protoc.

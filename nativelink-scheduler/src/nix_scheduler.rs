@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use derivative::Derivative;
+use futures::future::try_join;
 use futures::{Future, stream};
 use nativelink_config::schedulers::NixProxySpec;
-use nativelink_error::Error;
+use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
+use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, ActionState, OperationId, WorkerId,
 };
@@ -37,6 +39,12 @@ use nativelink_util::store_trait::Store;
 use tokio::sync::{Mutex as TokioMutex, Notify, watch};
 use tokio::time;
 use tracing::{Level, event};
+
+use nativelink_proto::build::bazel::remote::execution::v2::{
+    Action, ActionResult as ProtoActionResult, Command as ProtoCommand,
+    Directory as ProtoDirectory, Directory, DirectoryNode, ExecuteResponse, FileNode, SymlinkNode,
+    Tree as ProtoTree, UpdateActionResultRequest,
+};
 
 use crate::awaited_action_db::AwaitedActionDb;
 use crate::platform_property_manager::PlatformPropertyManager;
@@ -93,9 +101,12 @@ pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unp
     /// Priority queue of actions ordered by timeout time
     timeout_queue: Arc<TokioMutex<BinaryHeap<TimeoutEntry<I>>>>,
 
-    /// Store manager for accessing content
+    /// Store manager for actions
     #[allow(dead_code)]
     ac_store: Store,
+
+    /// Store manager for data
+    cas_store: Store,
 
     /// Function to get the current time
     now_fn: NowFn,
@@ -105,33 +116,15 @@ pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unp
 }
 
 // Struct to represent an action in the timeout priority queue
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Derivative)]
+#[derivative(PartialOrd, Ord, PartialEq, Eq)]
 struct TimeoutEntry<I: InstantWrapper> {
     // The time when this action will timeout
     timeout_time: I,
     // The operation ID for this action
+    #[derivative(PartialOrd = "ignore", PartialEq = "ignore", Ord = "ignore")]
     operation_id: OperationId,
 }
-
-impl<I: InstantWrapper> Ord for TimeoutEntry<I> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.timeout_time.cmp(&self.timeout_time)
-    }
-}
-
-impl<I: InstantWrapper> PartialOrd for TimeoutEntry<I> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.timeout_time.cmp(&other.timeout_time))
-    }
-}
-
-impl<I: InstantWrapper> PartialEq for TimeoutEntry<I> {
-    fn eq(&self, other: &Self) -> bool {
-        self.timeout_time.eq(&other.timeout_time)
-    }
-}
-
-impl<I: InstantWrapper> Eq for TimeoutEntry<I> {}
 
 impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>
     NixScheduler<I, NowFn>
@@ -142,6 +135,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         task_change_notify: Arc<Notify>,
         now_fn: NowFn,
         ac_store: Store,
+        cas_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         Self::new_with_callback(
             _spec,
@@ -150,6 +144,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             task_change_notify,
             now_fn,
             ac_store,
+            cas_store,
         )
     }
 
@@ -164,6 +159,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         task_change_notify: Arc<Notify>,
         now_fn: NowFn,
         ac_store: Store,
+        cas_store: Store,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
 
@@ -187,6 +183,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                 active_actions: active_actions.clone(),
                 timeout_queue: timeout_queue.clone(),
                 ac_store,
+                cas_store,
                 now_fn: now_fn.clone(),
                 task_change_notify: task_change_notify.clone(),
             };
@@ -270,6 +267,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                         client_operation_id: op_id.clone(),
                         stage: ActionStage::Completed(timeout_result),
                         action_digest,
+                        last_transition_timestamp: SystemTime::now(),
                     });
 
                     // Send the update
@@ -300,6 +298,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             client_operation_id: client_operation_id.clone(),
             stage: ActionStage::Executing,
             action_digest,
+            last_transition_timestamp: SystemTime::now(),
         });
 
         // Create a watch channel with the running state
@@ -312,12 +311,26 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
         // Add the action to the timeout queue
         self.timeout_queue.lock().await.push(TimeoutEntry {
-            timeout_time: now.add(action_info.timeout),
+            timeout_time: now.add(Duration::from_secs(60).min(action_info.timeout)),
             operation_id: client_operation_id.clone(),
         });
 
         // Notify the timeout monitor task
         self.task_change_notify.notify_one();
+
+        let command = get_and_decode_digest::<ProtoCommand>(
+            &self.cas_store,
+            action_info.command_digest.into(),
+        )
+        .await
+        .err_tip(|| "Converting command_digest to Command");
+
+        let directory = get_and_decode_digest::<ProtoDirectory>(
+            &self.cas_store,
+            action_info.input_root_digest.into(),
+        )
+        .await
+        .err_tip(|| "Converting digest to Directory");
 
         // Log detailed information about the received action
         // Note: In a production environment, we could use the ac_store (currently just storing the name: {})
@@ -333,7 +346,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             //platform_props = ?action_info.platform_properties,
             //priority = ?action_info.priority,
             //qualifier = ?action_info.unique_qualifier,
-            "NixScheduler: Received action with detailed info (will timeout) at current time"
+            "NixScheduler: Received action with detailed info (will timeout) at current time\n\n{action_info:#?}\n\n{command:#?}\n\n{directory:#?}\n\n"
         );
 
         Box::new(NixActionStateResult {
@@ -516,17 +529,6 @@ impl WorkerScheduler for NixWorkerScheduler {
     }
 
     async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {}
-
-    async fn notify_complete(
-        &self,
-        _worker_id: &WorkerId,
-        _operation_id: &OperationId,
-    ) -> Result<(), Error> {
-        // self.worker_scheduler
-        //     .notify_complete(worker_id, operation_id)
-        //     .await
-        Ok(())
-    }
 }
 
 impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>

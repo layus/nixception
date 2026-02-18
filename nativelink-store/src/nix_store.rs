@@ -24,24 +24,24 @@ use bytes::BytesMut;
 
 use nativelink_config::stores::NixSpec;
 use nativelink_error::ResultExt;
-use nativelink_error::{make_err, Code, Error};
+use nativelink_error::{Code, Error, make_err};
 use nativelink_metric::MetricsComponent;
 use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::common::PackedHash;
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
-use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
+use nativelink_util::store_trait::{RemoveItemCallback, StoreDriver, StoreKey, UploadSizeInfo};
 
 use nix_compat::nixhash::CAHash;
 use nix_compat::nixhash::NixHash;
-use nix_compat::store_path::build_ca_path;
 use nix_compat::store_path::StorePath;
+use nix_compat::store_path::build_ca_path;
+use nix_remote::StorePathSet;
+use nix_remote::ValidPathInfoWithPath;
 use nix_remote::worker_op::Resp;
 use nix_remote::worker_op::StreamingRecv;
 use nix_remote::worker_op::WorkerOp;
 use nix_remote::worker_op::{AddToStore, WithFramedSource};
-use nix_remote::StorePathSet;
-use nix_remote::ValidPathInfoWithPath;
 use nix_remote::{nix_client::NixDaemonClient, stderr::Msg};
 
 use tokio::io::AsyncReadExt;
@@ -214,8 +214,7 @@ impl StoreDriver for NixStore {
         let mut file = fs::open_file(sp.clone(), offset, limit).await?;
         loop {
             let mut buf = BytesMut::with_capacity(4096);
-            file
-                .read_buf(&mut buf)
+            file.read_buf(&mut buf)
                 .await
                 .err_tip(|| "Failed to read data in filesystem store")?;
             if buf.is_empty() {
@@ -243,5 +242,13 @@ impl StoreDriver for NixStore {
 
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Sync + Send + 'static> {
         self
+    }
+
+    fn register_remove_callback(
+        self: Arc<Self>,
+        callback: Arc<dyn RemoveItemCallback>,
+    ) -> Result<(), Error> {
+        drop(callback);
+        Ok(())
     }
 }

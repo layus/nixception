@@ -1,0 +1,87 @@
+{
+  "servers": [
+    {
+      "name": "public",
+      "listener": {
+        "http": {
+          "socket_address": "0.0.0.0:50051"
+        }
+      },
+      "services": {
+        "cas": [
+          {
+            "instance_name": "main",
+            "cas_store": "NIX_STORE",
+          }
+        ],
+        "ac": [
+          {
+            "instance_name": "main",
+            "ac_store": "VOID",
+          }
+        ],
+        "execution": [
+          {
+            "instance_name": "main",
+            "cas_store": "NIX_STORE",
+            "scheduler": "NIX_SCHEDULER",
+          },
+        ],
+        "capabilities": [
+          {
+            "instance_name": "main",
+            "remote_execution": {
+              "scheduler": "NIX_SCHEDULER",
+            },
+          },
+        ],
+        "bytestream": [
+            {
+              "instance_name": "main",
+              "cas_store": "NIX_STORE",
+            },
+          ],
+      }
+    }
+  ],
+  "schedulers": [
+    {
+      "name": "NIX_SCHEDULER",
+      "nix_proxy": {
+        "ac_store": "VOID",
+        "cas_store": "NIX_STORE",
+      },
+    },
+  ],
+  "stores": [
+    {
+      "name": "VOID",
+      "noop": {}
+    },
+    {
+      "name": "AC_MAIN_STORE",
+      "memory": {
+        "eviction_policy": {
+          "max_bytes": "500mb"
+        }
+      }
+    },
+    {
+      "name": "NIX_STORE",
+      "nix_store": {}
+    },
+    {
+      "name": "CACHE_STORE",
+      "filesystem": {
+        "content_path": "/tmp/nix-cache/content",
+        "temp_path": "/tmp/nix-cache/temp",
+        "eviction_policy": {
+          "max_bytes": "2gb"
+        }
+      }
+    }
+  ],
+  "global": {
+    "max_open_files": 512
+  }
+}
