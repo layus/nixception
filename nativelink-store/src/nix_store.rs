@@ -188,7 +188,7 @@ impl NixStore {
         content: &[u8],
         name: &str,
         inputs: &Vec<StorePath<String>>,
-    ) -> Result<(), Error> {
+    ) -> Result<ValidPathInfoWithPath, Error> {
         let refs = StorePathSet {
             paths: {
                 let mut paths: Vec<nix_remote::StorePath> = inputs
@@ -207,7 +207,7 @@ impl NixStore {
         tx.send_eof()
             .err_tip(|| "Failed to send EOF into channel")?;
 
-        let _reply = self
+        let reply = self
             .upload_to_nix_daemon(name, &digest, refs, rx, content.len())
             .await?;
 
@@ -222,7 +222,7 @@ impl NixStore {
         //         &digest
         //     ))?;
 
-        Ok(())
+        Ok(reply)
     }
 }
 

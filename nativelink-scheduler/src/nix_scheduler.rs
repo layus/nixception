@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::iter::once;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -160,84 +160,105 @@ fn is_terminal_stage(stage: &ActionStage) -> bool {
     )
 }
 
-/// Perform a state-update on an active operation.
-///
-/// * For intermediate stages (e.g. `Executing`) the state is broadcast to all
-///   watchers but the operation stays in `active_actions`.
-/// * For terminal stages (`Completed`, `CompletedFromCache`, errors, …) the
-///   state is broadcast **and** the operation is removed from `active_actions`
-///   so that the timeout monitor will skip it.
-///
-/// This is intentionally a free function so it can be called without holding an
-/// `Arc<NixScheduler>` — callers just pass a cloned `Arc<TokioMutex<…>>`.
-async fn perform_update_action(
-    active_actions: &TokioMutex<ActiveActionsMap>,
-    operation_id: &OperationId,
-    update: UpdateOperationType,
-) -> Result<(), Error> {
-    let mut actions = active_actions.lock().await;
-    let (action_info, state_tx) = actions.get(operation_id).ok_or_else(|| {
-        make_err!(
-            Code::NotFound,
-            "Operation {:?} not found in active actions",
-            operation_id
-        )
-    })?;
+/// Bundles the shared `active_actions` map and an `operation_id` so that
+/// callers can send state updates without repeating those two arguments
+/// everywhere.
+struct ActionUpdater {
+    active_actions: Arc<TokioMutex<ActiveActionsMap>>,
+    operation_id: OperationId,
+}
 
-    let action_digest = action_info.digest();
-
-    // Map the update type to an ActionStage.
-    let stage = match update {
-        UpdateOperationType::ExecutionComplete => {
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 0,
-                ..Default::default()
-            })
+impl ActionUpdater {
+    fn new(active_actions: Arc<TokioMutex<ActiveActionsMap>>, operation_id: OperationId) -> Self {
+        Self {
+            active_actions,
+            operation_id,
         }
-        UpdateOperationType::UpdateWithActionStage(stage) => stage,
-        UpdateOperationType::UpdateWithError(ref e) => {
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 1,
-                error: Some(e.clone()),
-                ..Default::default()
-            })
-        }
-        UpdateOperationType::UpdateWithDisconnect => {
-            event!(Level::WARN, ?operation_id, "Worker disconnected");
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 1,
-                ..Default::default()
-            })
-        }
-        UpdateOperationType::KeepAlive => {
-            // Nothing to change for keep-alive.
-            return Ok(());
-        }
-    };
-
-    let terminal = is_terminal_stage(&stage);
-
-    // Broadcast the new state to all watchers.
-    let new_state = Arc::new(ActionState {
-        client_operation_id: operation_id.clone(),
-        stage,
-        action_digest,
-        last_transition_timestamp: SystemTime::now(),
-    });
-    drop(state_tx.send(new_state));
-
-    // Only remove on terminal stages. The timeout monitor will skip
-    // entries whose operation_id is no longer in the map.
-    if terminal {
-        actions.remove(operation_id);
-        event!(
-            Level::INFO,
-            ?operation_id,
-            "NixScheduler: Action completed and removed from active actions"
-        );
     }
 
-    Ok(())
+    /// Send a state update and return whether it succeeded.
+    ///
+    /// * For intermediate stages (e.g. `Executing`) the state is broadcast to
+    ///   all watchers but the operation stays in `active_actions`.
+    /// * For terminal stages (`Completed`, `CompletedFromCache`, errors, …)
+    ///   the state is broadcast **and** the operation is removed from
+    ///   `active_actions` so that the timeout monitor will skip it.
+    async fn try_update(&self, update: UpdateOperationType) -> Result<(), Error> {
+        let mut actions = self.active_actions.lock().await;
+        let (action_info, state_tx) = actions.get(&self.operation_id).ok_or_else(|| {
+            make_err!(
+                Code::NotFound,
+                "Operation {:?} not found in active actions",
+                self.operation_id
+            )
+        })?;
+
+        let action_digest = action_info.digest();
+
+        // Map the update type to an ActionStage.
+        let stage = match update {
+            UpdateOperationType::ExecutionComplete => {
+                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                    exit_code: 0,
+                    ..Default::default()
+                })
+            }
+            UpdateOperationType::UpdateWithActionStage(stage) => stage,
+            UpdateOperationType::UpdateWithError(ref e) => {
+                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                    exit_code: 1,
+                    error: Some(e.clone()),
+                    ..Default::default()
+                })
+            }
+            UpdateOperationType::UpdateWithDisconnect => {
+                event!(Level::WARN, operation_id = ?self.operation_id, "Worker disconnected");
+                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                    exit_code: 1,
+                    ..Default::default()
+                })
+            }
+            UpdateOperationType::KeepAlive => {
+                return Ok(());
+            }
+        };
+
+        let terminal = is_terminal_stage(&stage);
+
+        // Broadcast the new state to all watchers.
+        let new_state = Arc::new(ActionState {
+            client_operation_id: self.operation_id.clone(),
+            stage,
+            action_digest,
+            last_transition_timestamp: SystemTime::now(),
+        });
+        drop(state_tx.send(new_state));
+
+        // Only remove on terminal stages. The timeout monitor will skip
+        // entries whose operation_id is no longer in the map.
+        if terminal {
+            actions.remove(&self.operation_id);
+            event!(
+                Level::INFO,
+                operation_id = ?self.operation_id,
+                "Action completed and removed from active actions"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Fire-and-forget update: sends the update and logs any error internally.
+    async fn update(&self, update: UpdateOperationType) {
+        if let Err(e) = self.try_update(update).await {
+            event!(
+                Level::ERROR,
+                error = ?e,
+                operation_id = ?self.operation_id,
+                "Failed to update action state"
+            );
+        }
+    }
 }
 
 impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>
@@ -408,17 +429,14 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         // Notify the timeout monitor task
         self.task_change_notify.notify_one();
 
-        let timeout_duration = Duration::from_secs(60).min(action_info.timeout);
-
         // Spawn the action execution as a fire-and-forget background task.
         // All state transitions are handled inside `execute_action` via
-        // `perform_update_action`.
+        // the `ActionUpdater`.
+        let updater = ActionUpdater::new(self.active_actions.clone(), client_operation_id.clone());
         tokio::spawn(execute_action(
             self.cas_store.clone(),
-            self.active_actions.clone(),
-            client_operation_id.clone(),
+            updater,
             action_info.clone(),
-            timeout_duration,
         ));
 
         Box::new(NixActionStateResult {
@@ -440,68 +458,14 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 ///
 /// All outcomes (success, error, timeout) are communicated exclusively via
 /// `perform_update_action` — this function returns nothing.
-async fn execute_action(
-    cas_store: Store,
-    active_actions: Arc<TokioMutex<ActiveActionsMap>>,
-    operation_id: OperationId,
-    action_info: Arc<ActionInfo>,
-    timeout_duration: Duration,
-) {
-    let result = time::timeout(timeout_duration, async {
-        prepare_derivation(&cas_store, &action_info).await
-    })
-    .await;
-
+async fn execute_action(cas_store: Store, updater: ActionUpdater, action_info: Arc<ActionInfo>) {
+    let result = prepare_derivation(&cas_store, &action_info).await;
     let drv_path = match result {
-        Ok(Ok(path)) => path,
-        Ok(Err(e)) => {
-            event!(
-                Level::ERROR,
-                error = ?e,
-                ?operation_id,
-                "Action failed during derivation preparation"
-            );
-            if let Err(update_err) = perform_update_action(
-                &active_actions,
-                &operation_id,
-                UpdateOperationType::UpdateWithError(e),
-            )
-            .await
-            {
-                event!(
-                    Level::ERROR,
-                    error = ?update_err,
-                    ?operation_id,
-                    "Failed to report derivation preparation error"
-                );
-            }
-            return;
-        }
-        Err(_elapsed) => {
-            event!(
-                Level::WARN,
-                ?operation_id,
-                "Action timed out during derivation preparation"
-            );
-            if let Err(update_err) = perform_update_action(
-                &active_actions,
-                &operation_id,
-                UpdateOperationType::UpdateWithActionStage(ActionStage::Completed(
-                    nativelink_util::action_messages::ActionResult {
-                        exit_code: 124,
-                        ..Default::default()
-                    },
-                )),
-            )
-            .await
-            {
-                event!(
-                    Level::ERROR,
-                    error = ?update_err,
-                    ?operation_id,
-                    "Failed to report derivation preparation timeout"
-                );
-            }
+        Ok(path) => path,
+        Err(e) => {
+            updater
+                .update(UpdateOperationType::UpdateWithError(e))
+                .await;
             return;
         }
     };
@@ -510,43 +474,19 @@ async fn execute_action(
     event!(
         Level::INFO,
         drv_path = ?drv_path.to_absolute_path(),
-        ?operation_id,
+        operation_id = ?updater.operation_id,
         "Derivation uploaded, marking action as Executing"
     );
-    if let Err(e) = perform_update_action(
-        &active_actions,
-        &operation_id,
-        UpdateOperationType::UpdateWithActionStage(ActionStage::Executing),
-    )
-    .await
-    {
-        event!(
-            Level::ERROR,
-            error = ?e,
-            ?operation_id,
-            "Failed to transition action to Executing"
-        );
-        return;
-    }
+    updater
+        .update(UpdateOperationType::UpdateWithActionStage(
+            ActionStage::Executing,
+        ))
+        .await;
 
     // Phase 2 — TODO: build the derivation / wait for the build to
     // finish and collect outputs.  This is not yet implemented; for now
     // we immediately mark the action as completed.
-
-    if let Err(e) = perform_update_action(
-        &active_actions,
-        &operation_id,
-        UpdateOperationType::ExecutionComplete,
-    )
-    .await
-    {
-        event!(
-            Level::ERROR,
-            error = ?e,
-            ?operation_id,
-            "Failed to mark action as completed"
-        );
-    }
+    updater.update(UpdateOperationType::ExecutionComplete).await;
 }
 
 /// Prepares and uploads a Nix derivation for the given action:
@@ -595,11 +535,28 @@ async fn prepare_derivation(
         ),
         ("out".into(), BString::default()),
     ]);
+    let builder_path: StorePath<&str> = StorePath::from_absolute_path_full(
+        "/nix/store/03r3ipfa69l8nla101khyw3g67j24357-bash-5.3p9.drv",
+    )
+    .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?
+    .0;
+    let builder_hash: [u8; 32] = [
+        148, 82, 165, 89, 140, 175, 83, 34, 16, 61, 21, 144, 125, 83, 22, 252, 171, 33, 140, 108,
+        140, 218, 28, 83, 107, 67, 174, 18, 43, 166, 173, 163,
+    ];
+    let builder_info = cas_store
+        .downcast_ref::<NixStore>(None)
+        .unwrap()
+        .as_pin()
+        .query_path_info("/nix/store/f15k3dpilmiyv6zgpib289rnjykgr1r4-bash-5.3p9")?
+        .ok_or(make_err!(Code::Internal, "Could not query path info"))?;
+    let builder_deriver = StorePath::from_absolute_path(&builder_info.deriver.0.0)
+        .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?;
     let mut derivation: Derivation = Derivation {
-        arguments: vec!["-ec".into(), "echo lol".into()],
-        builder: "/nix/store/lw117lsr8d585xs63kx5k233impyrq7q-bash-5.3p3/bin/bash".into(),
+        arguments: vec!["-ec".into(), "eval \"$script\"".into()],
+        builder: "/nix/store/f15k3dpilmiyv6zgpib289rnjykgr1r4-bash-5.3p9/bin/bash".into(),
         environment,
-        input_derivations: Default::default(),
+        input_derivations: BTreeMap::from([(builder_deriver, BTreeSet::from(["out".into()]))]),
         input_sources: entries
             .into_iter()
             .map(|e| e.store_path.to_owned())
@@ -608,7 +565,10 @@ async fn prepare_derivation(
         system: "x86_64-linux".into(),
     };
 
-    let hash_modulo = derivation.hash_derivation_modulo(|_| panic!("Should not be called"));
+    let hash_modulo = derivation.hash_derivation_modulo(|a| {
+        assert_eq!(a, &builder_path);
+        builder_hash
+    });
     derivation
         .calculate_output_paths("reapi-action", &hash_modulo)
         .map_err(|e| make_err!(Code::Internal, "Failed to calculate output paths: {}", e))?;
@@ -616,12 +576,17 @@ async fn prepare_derivation(
     let drv_path = derivation
         .calculate_derivation_path("reapi-action")
         .map_err(|e| make_err!(Code::Internal, "Failed to calculate derivation path: {}", e))?;
-    let mut serialized_derivation = Vec::new();
-    derivation
-        .serialize(&mut serialized_derivation)
-        .map_err(|e| make_err!(Code::Internal, "Failed to serialize derivation: {}", e))?;
 
-    cas_store
+    let serialized_derivation = derivation.to_aterm_bytes();
+    let references: Vec<StorePath<String>> = derivation
+        .input_sources
+        .into_iter()
+        .chain(derivation.input_derivations.into_keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let path_info = cas_store
         .downcast_ref::<NixStore>(None)
         .unwrap()
         .as_pin()
@@ -629,10 +594,11 @@ async fn prepare_derivation(
             CAHash::Text([0; 32]).to_nix_nixbase32_string(),
             &serialized_derivation,
             "reapi-action.drv",
-            &derivation.input_sources.to_owned().into_iter().collect(),
+            &references,
         )
         .await?;
 
+    assert_eq!(&path_info.path.0.0, &drv_path.to_absolute_path());
     Ok(drv_path)
 }
 
@@ -784,7 +750,9 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         operation_id: &OperationId,
         update: UpdateOperationType,
     ) -> Result<(), Error> {
-        perform_update_action(&self.active_actions, operation_id, update).await
+        ActionUpdater::new(self.active_actions.clone(), operation_id.clone())
+            .try_update(update)
+            .await
     }
 
     async fn worker_keep_alive_received(
