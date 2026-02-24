@@ -22,7 +22,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::BytesMut;
 
-use itertools::Itertools;
 use nativelink_config::stores::NixSpec;
 use nativelink_error::ResultExt;
 use nativelink_error::{Code, Error, make_err};

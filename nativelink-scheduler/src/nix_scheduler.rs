@@ -14,27 +14,23 @@
 
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::iter::once;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bstr::BString;
 use derivative::Derivative;
-use futures::future::try_join;
-use futures::{Future, FutureExt, stream};
+use futures::{Future, stream};
 use nativelink_config::schedulers::NixProxySpec;
-use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
+use nativelink_error::{Error, ResultExt};
 use nativelink_metric::{MetricsComponent, RootMetricsComponent};
-use nativelink_store::ac_utils::{compute_buf_digest, get_and_decode_digest};
-use nativelink_store::nix_store::{NixStore, key_to_ca, key_to_store_path};
+use nativelink_store::ac_utils::get_and_decode_digest;
+use nativelink_store::nix_store::{NixStore, key_to_store_path};
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, ActionState, OperationId, WorkerId,
 };
 use nativelink_util::common::DigestInfo;
-use nativelink_util::digest_hasher::{
-    DigestHasher, DigestHasherFunc, DigestHasherFuncImpl, DigestHasherImpl,
-};
 use nativelink_util::instant_wrapper::InstantWrapper;
 use nativelink_util::known_platform_property_provider::KnownPlatformPropertyProvider;
 use nativelink_util::operation_state_manager::{
@@ -49,17 +45,12 @@ use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::StorePath;
 
-use nix_remote::worker_op::BuildMode;
-use nix_remote::worker_op::{AddToStore, BuildDerivation};
-use prost::Message;
 use tokio::sync::{Mutex as TokioMutex, Notify, watch};
 use tokio::time;
 use tracing::{Level, event};
 
 use nativelink_proto::build::bazel::remote::execution::v2::{
-    Action, ActionResult as ProtoActionResult, Command as ProtoCommand, Digest, DigestFunction,
-    Directory as ProtoDirectory, Directory, DirectoryNode, ExecuteResponse, FileNode, SymlinkNode,
-    Tree as ProtoTree, UpdateActionResultRequest,
+    Command as ProtoCommand, Directory as ProtoDirectory,
 };
 
 use crate::awaited_action_db::AwaitedActionDb;
@@ -365,17 +356,16 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             .chain(once(command.arguments.join(" ")))
             .collect::<Vec<_>>()
             .join("\n");
-        dbg!(&script);
-        let script_digest: DigestInfo =
-            compute_buf_digest(script.as_bytes(), &mut DigestHasherFunc::Sha256.hasher());
-        self.cas_store
-            .update_oneshot(script_digest, script.to_owned().into())
-            .await
-            .unwrap();
-
-        let script_path = key_to_store_path(&StoreKey::Digest(script_digest))
-            .unwrap()
-            .to_absolute_path();
+        // Upload script to store (unused, we pass it as env var for now)
+        // let script_digest: DigestInfo =
+        //     compute_buf_digest(script.as_bytes(), &mut DigestHasherFunc::Sha256.hasher());
+        // self.cas_store
+        //     .update_oneshot(script_digest, script.to_owned().into())
+        //     .await
+        //     .unwrap();
+        // let _script_path = key_to_store_path(&StoreKey::Digest(script_digest))
+        //     .unwrap()
+        //     .to_absolute_path();
 
         let outputs = BTreeMap::from([("out".to_string(), Output::default())]);
         let environment = BTreeMap::from([
@@ -400,55 +390,16 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         };
 
         let hash_modulo = derivation.hash_derivation_modulo(|_| panic!("Should not be called"));
-        dbg!(&hash_modulo);
-        dbg!(&derivation);
         derivation
             .calculate_output_paths("reapi-action", &hash_modulo)
             .unwrap();
-        dbg!(&derivation);
-        // derivation.environment.insert(
-        //     "out".into(),
-        //     "/nix/store/z7ciy4ibs5v74n296326v3gz1i36dr93-reapi-action".into(),
-        // );
-        // derivation.outputs.insert(
-        //     "out".into(),
-        //     Output {
-        //         path: Some(
-        //             StorePath::from_absolute_path_full(
-        //                 "/nix/store/z7ciy4ibs5v74n296326v3gz1i36dr93-reapi-action",
-        //             )
-        //             .unwrap()
-        //             .0,
-        //         ),
-        //         ca_hash: None,
-        //     },
-        // );
+
         let drv_path = derivation
             .calculate_derivation_path("reapi-action")
             .unwrap();
-        dbg!(&drv_path.to_absolute_path());
         let mut serialized_derivation = Vec::new();
         derivation.serialize(&mut serialized_derivation).unwrap();
 
-        let derivation_digest: DigestInfo = compute_buf_digest(
-            &serialized_derivation,
-            &mut DigestHasherFunc::Sha256.hasher(),
-        );
-
-        let drv_store_key: StoreKey = StoreKey::Digest(DigestInfo::new(
-            hash_modulo,
-            serialized_derivation.len() as u64,
-        ));
-
-        //assert_eq!(
-        //    drv_path,
-        //    StorePath::from_name_and_digest("reapi-action.drv".into(), &hash_modulo).unwrap()
-        //);
-
-        event!(
-            Level::INFO,
-            serialized = String::from_utf8(serialized_derivation.to_owned()).unwrap(),
-        );
         self.cas_store
             .downcast_ref::<NixStore>(None)
             .unwrap()
@@ -467,17 +418,17 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         // to fetch and log the actual command details using the command_digest
         event!(
             Level::INFO,
-            ?client_operation_id,
-            ?action_digest,
-            ?action_info,
-            drv_path = drv_path.to_absolute_path(),
+            //?client_operation_id,
+            //?action_digest,
+            //?action_info,
             //command_digest = ?action_info.command_digest,
             //input_root_digest = ?action_info.input_root_digest,
-            timeout_secs = ?action_info.timeout.as_secs(),
+            //timeout_secs = ?action_info.timeout.as_secs(),
             //platform_props = ?action_info.platform_properties,
             //priority = ?action_info.priority,
             //qualifier = ?action_info.unique_qualifier,
-            "NixScheduler: Received action with detailed info (will timeout) at current time\n\n{derivation:#?}\n\n"
+            drv_path = ?drv_path.to_absolute_path(),
+            "NixScheduler: Received action with detailed info (will timeout)"
         );
 
         Box::new(NixActionStateResult {
@@ -642,9 +593,9 @@ impl WorkerScheduler for NixWorkerScheduler {
 
     async fn update_action(
         &self,
-        worker_id: &WorkerId,
-        operation_id: &OperationId,
-        update: UpdateOperationType,
+        _worker_id: &WorkerId,
+        _operation_id: &OperationId,
+        _update: UpdateOperationType,
     ) -> Result<(), Error> {
         // event!(
         //     Level::INFO,
@@ -658,8 +609,8 @@ impl WorkerScheduler for NixWorkerScheduler {
 
     async fn worker_keep_alive_received(
         &self,
-        worker_id: &WorkerId,
-        timestamp: WorkerTimestamp,
+        _worker_id: &WorkerId,
+        _timestamp: WorkerTimestamp,
     ) -> Result<(), Error> {
         // event!(
         //     Level::DEBUG,
@@ -670,7 +621,7 @@ impl WorkerScheduler for NixWorkerScheduler {
         Ok(())
     }
 
-    async fn remove_worker(&self, worker_id: &WorkerId) -> Result<(), Error> {
+    async fn remove_worker(&self, _worker_id: &WorkerId) -> Result<(), Error> {
         // event!(
         //     Level::INFO,
         //     ?worker_id,
@@ -679,7 +630,7 @@ impl WorkerScheduler for NixWorkerScheduler {
         Ok(())
     }
 
-    async fn remove_timedout_workers(&self, now_timestamp: WorkerTimestamp) -> Result<(), Error> {
+    async fn remove_timedout_workers(&self, _now_timestamp: WorkerTimestamp) -> Result<(), Error> {
         // event!(
         //     Level::DEBUG,
         //     ?now_timestamp,
@@ -688,7 +639,11 @@ impl WorkerScheduler for NixWorkerScheduler {
         Ok(())
     }
 
-    async fn set_drain_worker(&self, worker_id: &WorkerId, is_draining: bool) -> Result<(), Error> {
+    async fn set_drain_worker(
+        &self,
+        _worker_id: &WorkerId,
+        _is_draining: bool,
+    ) -> Result<(), Error> {
         // event!(
         //     Level::INFO,
         //     ?worker_id,
