@@ -60,15 +60,17 @@ fn create_test_action_info(digest: DigestInfo, timeout_secs: u64) -> Arc<ActionI
 
 // Removed unused helper function
 
-// Test removed as NixScheduler no longer immediately completes actions
-// Instead, actions stay in running state until they time out
+// When the CAS store is empty the background task fails immediately during
+// derivation preparation (command digest not found).  The action should
+// transition from Queued → Completed with an error (exit code 1).
 
 #[nativelink_test]
-async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
+async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
     // Set mock clock to a deterministic starting point
     MockClock::set_time(Duration::from_secs(11363015));
 
-    // Create a NixScheduler
+    // Create a NixScheduler with empty CAS — execute_action will fail
+    // immediately because the command digest cannot be found.
     let task_change_notify = Arc::new(Notify::new());
     let awaited_action_db = memory_awaited_action_db_factory(
         0,
@@ -87,32 +89,28 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         cas_store,
     );
 
-    // Create a test action with a small timeout (1 second)
-    // This will be added to the priority queue with a timeout 1 second from now
     let action_digest = DigestInfo::new([2u8; 32], 100);
-    let action_info = create_test_action_info(action_digest, 1); // 1 second timeout
+    let action_info = create_test_action_info(action_digest, 1);
     let client_operation_id = OperationId::default();
 
     // Add the action to the scheduler
-    let action_result = scheduler
+    let mut action_result = scheduler
         .add_action(client_operation_id.clone(), action_info.clone())
         .await?;
 
-    // Verify the action is in running state
+    // The action starts in Queued state.
     let (state, _) = action_result.as_state().await?;
     match &state.stage {
-        ActionStage::Executing => {
-            // Expected state - action should be running
-        }
+        ActionStage::Queued => { /* expected */ }
         other => {
-            panic!("Expected ActionStage::Executing, got: {:?}", other);
+            panic!("Expected ActionStage::Queued, got: {:?}", other);
         }
     }
 
     // Should be able to find the action using filter_operations
     let filter = OperationFilter {
         operation_id: Some(client_operation_id.clone()),
-        stages: OperationStageFlags::Executing,
+        stages: OperationStageFlags::Queued,
         ..Default::default()
     };
 
@@ -123,20 +121,19 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
         "Action should be found in filter results"
     );
 
-    tokio::task::yield_now().await;
-
-    // Advance mock clock by 2 seconds to simulate timeout
-    MockClock::advance(Duration::from_secs(2));
-
-    task_change_notify.notify_one();
-    tokio::task::yield_now().await;
-
-    // Check that the action has timed out
-    let (state, _) = action_result.as_state().await?;
+    // Wait for the background task to complete — it will fail because the
+    // CAS is empty and transition the action straight to Completed.
+    let (state, _) = action_result.changed().await?;
     match &state.stage {
         ActionStage::Completed(result) => {
-            // Action should be completed with a timeout error
-            assert_eq!(result.exit_code, 124, "Expected timeout exit code 124");
+            assert_eq!(
+                result.exit_code, 1,
+                "Expected error exit code 1 (derivation preparation failed)"
+            );
+            assert!(
+                result.error.is_some(),
+                "Expected an error to be attached to the result"
+            );
         }
         other => {
             panic!("Expected ActionStage::Completed, got: {:?}", other);
