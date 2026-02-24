@@ -43,7 +43,7 @@ use nix_remote::ValidPathInfoWithPath;
 use nix_remote::worker_op::Resp;
 use nix_remote::worker_op::StreamingRecv;
 use nix_remote::worker_op::WorkerOp;
-use nix_remote::worker_op::{AddToStore, WithFramedSource};
+use nix_remote::worker_op::{AddToStore, Plain, QueryPathInfoResponse, WithFramedSource};
 use nix_remote::{nix_client::NixDaemonClient, stderr::Msg};
 
 use tokio::io::AsyncReadExt;
@@ -64,6 +64,57 @@ impl NixStore {
         }))
     }
 
+    /// Connects to the nix daemon and creates a new client.
+    fn connect(&self) -> Result<NixDaemonClient<UnixStream, UnixStream>, Error> {
+        let read_socket = UnixStream::connect(self.socket_path.clone())
+            .err_tip(|| format!("While opening socket '{}'", self.socket_path))?;
+        let write_socket = read_socket
+            .try_clone()
+            .err_tip(|| "While cloning nix daemon socket")?;
+        NixDaemonClient::new(read_socket, write_socket)
+            .map_err(|e| make_err!(Code::Internal, "While creating a new NixClient: {}", e))
+    }
+
+    /// Queries the nix daemon for path info about the given store path.
+    ///
+    /// Returns `Some(ValidPathInfo)` if the path is valid, `None` otherwise.
+    pub fn query_path_info(
+        &self,
+        store_path: &str,
+    ) -> Result<Option<nix_remote::worker_op::ValidPathInfo>, Error> {
+        let mut client = self.connect()?;
+
+        let response_type: Resp<QueryPathInfoResponse> = Default::default();
+        let query_op = &WorkerOp::QueryPathInfo(
+            Plain(nix_remote::StorePath(store_path.to_owned().into())),
+            response_type.clone(),
+        );
+
+        client
+            .send_worker_op_to_daemon(query_op)
+            .map_err(|e| make_err!(Code::Internal, "Sending QueryPathInfo op to daemon: {}", e))?;
+
+        debug_assert!(!query_op.requires_streaming());
+
+        // Read error messages from the daemon.
+        loop {
+            let error_message_from_builder = client
+                .read_error_msg()
+                .map_err(|e| make_err!(Code::Internal, "Reading error msg from daemon: {}", e))?;
+            if error_message_from_builder == Msg::Last(()) {
+                break;
+            }
+            dbg!(&error_message_from_builder);
+        }
+
+        // Get the final reply.
+        let reply = client
+            .read_build_response_from_daemon(&response_type)
+            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
+
+        Ok(reply.path)
+    }
+
     /// Internal method that handles the full upload-to-nix-daemon flow:
     ///  1. Connect to the daemon
     ///  2. Send the AddToStore operation
@@ -80,15 +131,7 @@ impl NixStore {
         upload_size: usize,
     ) -> Result<ValidPathInfoWithPath, Error> {
         // Connect to the daemon socket.
-        let mut client = {
-            let read_socket = UnixStream::connect(self.socket_path.clone())
-                .err_tip(|| format!("While opening socket '{}'", self.socket_path))?;
-            let write_socket = read_socket
-                .try_clone()
-                .err_tip(|| "While cloning nix daemon socket")?;
-            NixDaemonClient::new(read_socket, write_socket)
-                .map_err(|e| make_err!(Code::Internal, "While creating a new NixClient: {}", e))
-        }?;
+        let mut client = self.connect()?;
 
         // Build and send the AddToStore operation.
         let add_to_store_op = AddToStore {

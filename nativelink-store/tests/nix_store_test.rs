@@ -27,6 +27,7 @@ const VALID_HASH1: &str = "0123456789abcdef0000000000000000000100000000000001234
 // $ sha256sum reapi-adapted #=> b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c
 // $ nix store add_file reapi-adapted # To ensure the test succeeds
 const FOO_HASH: &str = "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c";
+const BASH_STORE_PATH: &str = "/nix/store/lw117lsr8d585xs63kx5k233impyrq7q-bash-5.3p3";
 
 #[nativelink_test]
 async fn insert_simple() -> Result<(), Error> {
@@ -118,6 +119,29 @@ async fn simple_has_object_not_found() -> Result<(), Error> {
         result,
         Ok(None),
         "Expected to not find item, got: {result:?}"
+    );
+    Ok(())
+}
+
+#[nativelink_test]
+async fn query_path_info_found() -> Result<(), Error> {
+    let store = NixStore::new(
+        &(NixSpec {
+            socket_path: Some(SOCKET_PATH.to_string()),
+        }),
+    )
+    .await?;
+    let result = store.query_path_info(BASH_STORE_PATH)?;
+    assert!(
+        result.is_some(),
+        "Expected to find path info for bash, got None"
+    );
+    let info = result.unwrap();
+    dbg!(&info);
+    assert!(
+        info.nar_size > 0,
+        "Expected non-zero nar_size, got {}",
+        info.nar_size
     );
     Ok(())
 }
