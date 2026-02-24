@@ -20,13 +20,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 
 use nativelink_config::stores::NixSpec;
 use nativelink_error::ResultExt;
 use nativelink_error::{Code, Error, make_err};
 use nativelink_metric::MetricsComponent;
-use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
+use nativelink_util::buf_channel::{
+    DropCloserReadHalf, DropCloserWriteHalf, make_buf_channel_pair,
+};
 use nativelink_util::common::PackedHash;
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
@@ -52,17 +54,6 @@ pub struct NixStore {
     socket_path: String,
 }
 
-/// Describes how to stream data to the nix daemon.
-enum DataSource<'a> {
-    /// A fixed buffer available in memory.
-    Buffer(&'a [u8]),
-    /// An async stream with a known exact total size.
-    Stream {
-        reader: DropCloserReadHalf,
-        total_size: usize,
-    },
-}
-
 impl NixStore {
     pub async fn new(spec: &NixSpec) -> Result<Arc<Self>, Error> {
         Ok(Arc::new(Self {
@@ -76,7 +67,7 @@ impl NixStore {
     /// Internal method that handles the full upload-to-nix-daemon flow:
     ///  1. Connect to the daemon
     ///  2. Send the AddToStore operation
-    ///  3. Stream the data (from a buffer or an async reader)
+    ///  3. Stream the data from the reader
     ///  4. Read error messages and the final reply
     ///
     /// Returns the `ValidPathInfoWithPath` reply from the daemon.
@@ -85,7 +76,8 @@ impl NixStore {
         name: &str,
         cam_str: &str,
         refs: StorePathSet,
-        data: DataSource<'_>,
+        mut reader: DropCloserReadHalf,
+        upload_size: usize,
     ) -> Result<ValidPathInfoWithPath, Error> {
         // Connect to the daemon socket.
         let mut client = {
@@ -116,26 +108,15 @@ impl NixStore {
         debug_assert!(add_to_store_worker_op.requires_streaming());
 
         // Stream the data to the daemon.
-        match data {
-            DataSource::Buffer(content) => {
-                let length = content.len();
-                client.streaming_write_len(length as u64).unwrap();
-                client.streaming_write_buff(content, length).unwrap();
-            }
-            DataSource::Stream {
-                mut reader,
-                mut total_size,
-            } => {
-                while total_size > 0 {
-                    let bytes = reader.recv().await.unwrap();
-                    let chunk_len = bytes.len();
-                    client.streaming_write_len(chunk_len as u64).unwrap();
-                    client
-                        .streaming_write_buff(bytes.as_ref(), chunk_len)
-                        .unwrap();
-                    total_size -= chunk_len;
-                }
-            }
+        let mut remaining = upload_size;
+        while remaining > 0 {
+            let bytes = reader.recv().await.unwrap();
+            let chunk_len = bytes.len();
+            client.streaming_write_len(chunk_len as u64).unwrap();
+            client
+                .streaming_write_buff(bytes.as_ref(), chunk_len)
+                .unwrap();
+            remaining -= chunk_len;
         }
         // Signal end-of-stream and flush.
         client.streaming_write_len(0).unwrap();
@@ -176,8 +157,15 @@ impl NixStore {
             },
         };
 
+        let (mut tx, rx) = make_buf_channel_pair();
+        tx.send(Bytes::copy_from_slice(content))
+            .await
+            .err_tip(|| "Failed to send buffer into channel")?;
+        tx.send_eof()
+            .err_tip(|| "Failed to send EOF into channel")?;
+
         let _reply = self
-            .upload_to_nix_daemon(name, &digest, refs, DataSource::Buffer(content))
+            .upload_to_nix_daemon(name, &digest, refs, rx, content.len())
             .await?;
 
         // Write to nix store was successful, but we need to check that the
@@ -224,7 +212,7 @@ pub fn key_to_ca(key: &StoreKey) -> Result<CAHash, Error> {
     let StoreKey::Digest(digest) = key else {
         return Err(make_err!(
             Code::InvalidArgument,
-            "Nix backend does not support arbirary strings as keys"
+            "Nix backend does not support arbitrary strings as keys"
         ));
     };
     let PackedHash(hash) = *digest.packed_hash();
@@ -267,10 +255,9 @@ impl StoreDriver for NixStore {
         }?;
 
         let refs = StorePathSet { paths: vec![] };
-        let data = DataSource::Stream { reader, total_size };
 
         let reply = self
-            .upload_to_nix_daemon("reapi-adapted", &nix_ca, refs, data)
+            .upload_to_nix_daemon("reapi-adapted", &nix_ca, refs, reader, total_size)
             .await?;
 
         // Write to nix store was successful, but we need to check that the

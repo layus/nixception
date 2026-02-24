@@ -16,7 +16,7 @@ nativelink-proto = { path = "../nativelink-proto" }
 nativelink-store = { path = "../nativelink-store" }
 nativelink-util = { path = "../nativelink-util" }
 nix-compat = { path = "../../tvix/tvix/nix-compat" }
-nix-remote = { path = "../../nix-remote-rust/nix-remote" }
+# nix-remote = { path = "../../nix-remote-rust/nix-remote" }
 
 # TODO(palfrey): This should not be a dependency. Move the corresponding
 #                    files somewhere else.
