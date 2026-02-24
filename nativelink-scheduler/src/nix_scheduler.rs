@@ -58,6 +58,9 @@ use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
 
+/// Type alias for the shared active-actions map used throughout the scheduler.
+type ActiveActionsMap = HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>;
+
 // Struct to implement ActionStateResult for Nix scheduler
 struct NixActionStateResult {
     client_operation_id: OperationId,
@@ -81,7 +84,7 @@ impl ActionStateResult for NixActionStateResult {
             Ok((state, None))
         } else {
             // Channel closed
-            Err(nativelink_error::make_err!(
+            Err(make_err!(
                 Code::Internal,
                 "NixActionStateResult: changed() failed, channel closed"
             ))
@@ -93,7 +96,12 @@ impl ActionStateResult for NixActionStateResult {
     }
 }
 
-/// A simplified Nix scheduler that simulates running actions until timeout
+/// A simplified Nix scheduler that simulates running actions until timeout.
+///
+/// This struct implements both [`ClientStateManager`] (for accepting actions from
+/// clients) and [`WorkerScheduler`] (for receiving execution-status updates).
+/// There is no separate worker-scheduler object — `NixScheduler` owns all the
+/// state directly.
 #[derive(MetricsComponent)]
 pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>
 {
@@ -102,8 +110,7 @@ pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unp
     platform_property_manager: Arc<PlatformPropertyManager>,
 
     /// All active actions (operation_id -> action state channel sender)
-    active_actions:
-        Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
+    active_actions: Arc<TokioMutex<ActiveActionsMap>>,
 
     /// Priority queue of actions ordered by timeout time
     timeout_queue: Arc<TokioMutex<BinaryHeap<TimeoutEntry<I>>>>,
@@ -120,10 +127,6 @@ pub struct NixScheduler<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unp
 
     /// Notify when actions change
     task_change_notify: Arc<Notify>,
-
-    /// Worker scheduler for dispatching action updates
-    #[metric(group = "worker_scheduler")]
-    worker_scheduler: Arc<NixWorkerScheduler>,
 }
 
 impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> std::fmt::Debug
@@ -145,6 +148,79 @@ struct TimeoutEntry<I: InstantWrapper> {
     // The operation ID for this action
     #[derivative(PartialOrd = "ignore", PartialEq = "ignore", Ord = "ignore")]
     operation_id: OperationId,
+}
+
+/// Perform the state-update logic shared by both the [`WorkerScheduler`] trait
+/// implementation and the background execution task.
+///
+/// This is intentionally a free function so it can be called without holding an
+/// `Arc<NixScheduler>` — callers just pass a cloned `Arc<TokioMutex<…>>`.
+async fn perform_update_action(
+    active_actions: &TokioMutex<ActiveActionsMap>,
+    operation_id: &OperationId,
+    update: UpdateOperationType,
+) -> Result<(), Error> {
+    let mut actions = active_actions.lock().await;
+    let (action_info, state_tx) = actions.get(operation_id).ok_or_else(|| {
+        make_err!(
+            Code::NotFound,
+            "Operation {:?} not found in active actions",
+            operation_id
+        )
+    })?;
+
+    let action_digest = action_info.digest();
+
+    // Map the update type to the final ActionStage.
+    let stage = match update {
+        UpdateOperationType::ExecutionComplete => {
+            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                exit_code: 0,
+                ..Default::default()
+            })
+        }
+        UpdateOperationType::UpdateWithActionStage(stage) => stage,
+        UpdateOperationType::UpdateWithError(ref e) => {
+            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                exit_code: 1,
+                error: Some(e.clone()),
+                ..Default::default()
+            })
+        }
+        UpdateOperationType::UpdateWithDisconnect => {
+            event!(Level::WARN, ?operation_id, "Worker disconnected");
+            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                exit_code: 1,
+                ..Default::default()
+            })
+        }
+        UpdateOperationType::KeepAlive => {
+            // Nothing to change for keep-alive.
+            return Ok(());
+        }
+    };
+
+    // Send the final state to all watchers.
+    let completed_state = Arc::new(ActionState {
+        client_operation_id: operation_id.clone(),
+        stage,
+        action_digest,
+        last_transition_timestamp: SystemTime::now(),
+    });
+    drop(state_tx.send(completed_state));
+
+    // Remove the action from active_actions. This also effectively
+    // cancels any pending timeout — the timeout monitor will skip
+    // entries whose operation_id is no longer in the map.
+    actions.remove(operation_id);
+
+    event!(
+        Level::INFO,
+        ?operation_id,
+        "NixScheduler: Action completed and removed from active actions"
+    );
+
+    Ok(())
 }
 
 impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static>
@@ -184,22 +260,9 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
 
-        // Create shared state before both schedulers so they can reference it.
-        let active_actions = Arc::new(TokioMutex::new(HashMap::<
-            OperationId,
-            (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>),
-        >::new()));
-
+        // Create shared state.
+        let active_actions = Arc::new(TokioMutex::new(ActiveActionsMap::new()));
         let timeout_queue = Arc::new(TokioMutex::new(BinaryHeap::new()));
-
-        // Create a Nix worker scheduler with shared active_actions
-        let worker_scheduler = Arc::new(NixWorkerScheduler {
-            platform_property_manager: platform_property_manager.clone(),
-            active_actions: active_actions.clone(),
-        });
-
-        let worker_scheduler_for_scheduler = worker_scheduler.clone();
-        let worker_scheduler_ret: Arc<dyn WorkerScheduler> = worker_scheduler;
 
         let action_scheduler = Arc::new_cyclic(move |_weak_self| -> Self {
             let scheduler = NixScheduler {
@@ -210,11 +273,9 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                 cas_store,
                 now_fn: now_fn.clone(),
                 task_change_notify: task_change_notify.clone(),
-                worker_scheduler: worker_scheduler_for_scheduler.clone(),
             };
 
-            // Start background task for monitoring action timeouts
-            // event!(Level::INFO, "Spawning poll task");
+            // Start background task for monitoring action timeouts.
             tokio::spawn(Self::timeout_monitor_task(
                 active_actions,
                 timeout_queue,
@@ -225,23 +286,18 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             scheduler
         });
 
-        (action_scheduler, worker_scheduler_ret)
+        // The same Arc serves as both ClientStateManager and WorkerScheduler.
+        let worker_scheduler: Arc<dyn WorkerScheduler> = action_scheduler.clone();
+        (action_scheduler, worker_scheduler)
     }
 
     // Background task to monitor timeouts for actions
     async fn timeout_monitor_task(
-        active_actions: Arc<
-            TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>,
-        >,
+        active_actions: Arc<TokioMutex<ActiveActionsMap>>,
         timeout_queue: Arc<TokioMutex<BinaryHeap<TimeoutEntry<I>>>>,
         task_change_notify: Arc<Notify>,
         now_fn: NowFn,
     ) {
-        // event!(
-        //     Level::INFO,
-        //     "Starting NixScheduler timeout monitor task with priority queue"
-        // );
-
         loop {
             // Get the next timeout if any
             let now = now_fn();
@@ -256,14 +312,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
             if next_timeout_duration <= Duration::ZERO {
                 // Process timeouts immediately
             } else {
-                // event!(Level::INFO, ?next_timeout_duration, "NixScheduler: Polling");
                 tokio::select! {
                     // Sleep until next timeout
                     _ = time::sleep(next_timeout_duration), if next_timeout_duration < Duration::MAX => {},
                     // Or wait for notification about new actions
                     _ = task_change_notify.notified() => {},
                 }
-                // event!(Level::INFO, "NixScheduler: Poll done");
             }
 
             // Process timeouts
@@ -297,13 +351,6 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
                     // Send the update
                     state_tx.send(completed_state).unwrap();
-
-                    // event!(
-                    //     Level::INFO,
-                    //     ?op_id,
-                    //     ?action_digest,
-                    //     "NixScheduler: Action timed out"
-                    // );
                 }
             }
         }
@@ -331,7 +378,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
         self.active_actions.lock().await.insert(
             client_operation_id.clone(),
-            (action_info.clone(), tx.clone()), // keep tx around
+            (action_info.clone(), tx.clone()),
         );
 
         // Add the action to the timeout queue
@@ -346,11 +393,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         let timeout_duration = Duration::from_secs(60).min(action_info.timeout);
 
         // Spawn the action execution in a background task so we return immediately.
+        // We clone the `active_actions` Arc and call `perform_update_action` directly
+        // instead of going through `self` — this avoids needing an `Arc<Self>`.
         let cas_store = self.cas_store.clone();
-        let worker_scheduler = self.worker_scheduler.clone();
+        let active_actions = self.active_actions.clone();
         let op_id = client_operation_id.clone();
         let info = action_info.clone();
-        let dummy_worker_id = WorkerId::default();
         tokio::spawn(async move {
             let result =
                 time::timeout(timeout_duration, Self::execute_action(&cas_store, &info)).await;
@@ -383,10 +431,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                 }
             };
 
-            if let Err(e) = worker_scheduler
-                .update_action(&dummy_worker_id, &op_id, update)
-                .await
-            {
+            if let Err(e) = perform_update_action(&active_actions, &op_id, update).await {
                 event!(
                     Level::ERROR,
                     error = ?e,
@@ -452,42 +497,28 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         let mut derivation: Derivation = Derivation {
             arguments: vec!["-ec".into(), "echo lol".into()],
             builder: "/nix/store/lw117lsr8d585xs63kx5k233impyrq7q-bash-5.3p3/bin/bash".into(),
-            environment: environment,
+            environment,
             input_derivations: Default::default(),
             input_sources: entries
                 .into_iter()
                 .map(|e| e.store_path.to_owned())
                 .collect(),
-            outputs: outputs,
+            outputs,
             system: "x86_64-linux".into(),
         };
 
         let hash_modulo = derivation.hash_derivation_modulo(|_| panic!("Should not be called"));
         derivation
             .calculate_output_paths("reapi-action", &hash_modulo)
-            .map_err(|e| {
-                nativelink_error::make_err!(
-                    Code::Internal,
-                    "Failed to calculate output paths: {}",
-                    e
-                )
-            })?;
+            .map_err(|e| make_err!(Code::Internal, "Failed to calculate output paths: {}", e))?;
 
         let drv_path = derivation
             .calculate_derivation_path("reapi-action")
-            .map_err(|e| {
-                nativelink_error::make_err!(
-                    Code::Internal,
-                    "Failed to calculate derivation path: {}",
-                    e
-                )
-            })?;
+            .map_err(|e| make_err!(Code::Internal, "Failed to calculate derivation path: {}", e))?;
         let mut serialized_derivation = Vec::new();
         derivation
             .serialize(&mut serialized_derivation)
-            .map_err(|e| {
-                nativelink_error::make_err!(Code::Internal, "Failed to serialize derivation: {}", e)
-            })?;
+            .map_err(|e| make_err!(Code::Internal, "Failed to serialize derivation: {}", e))?;
 
         cas_store
             .downcast_ref::<NixStore>(None)
@@ -562,12 +593,6 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         &'a self,
         filter: OperationFilter,
     ) -> Result<ActionStateResultStream<'a>, Error> {
-        // event!(
-        //     Level::INFO,
-        //     ?filter,
-        //     "NixScheduler: Filter operations called"
-        // );
-
         // Get a snapshot of current actions
         let actions = self.active_actions.lock().await;
 
@@ -631,21 +656,12 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
     }
 }
 
-// Implementation of the WorkerScheduler trait for Nix scheduler.
-// Holds shared `active_actions` so it can look up, update, and remove
-// operations when workers (or the spawned action tasks) report back.
-#[derive(MetricsComponent)]
-struct NixWorkerScheduler {
-    #[metric(group = "platform_property_manager")]
-    platform_property_manager: Arc<PlatformPropertyManager>,
-
-    /// Shared map of active actions — the same instance held by `NixScheduler`.
-    active_actions:
-        Arc<TokioMutex<HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>>>,
-}
-
+// WorkerScheduler is now implemented directly on NixScheduler — no separate
+// NixWorkerScheduler struct is needed.
 #[async_trait]
-impl WorkerScheduler for NixWorkerScheduler {
+impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static> WorkerScheduler
+    for NixScheduler<I, NowFn>
+{
     fn get_platform_property_manager(&self) -> &PlatformPropertyManager {
         &self.platform_property_manager
     }
@@ -668,68 +684,7 @@ impl WorkerScheduler for NixWorkerScheduler {
         operation_id: &OperationId,
         update: UpdateOperationType,
     ) -> Result<(), Error> {
-        // Look up the operation in active_actions.
-        let mut actions = self.active_actions.lock().await;
-        let (action_info, state_tx) = actions.get(operation_id).ok_or_else(|| {
-            make_err!(
-                Code::NotFound,
-                "Operation {:?} not found in active actions",
-                operation_id
-            )
-        })?;
-
-        let action_digest = action_info.digest();
-
-        // Map the update type to the final ActionStage.
-        let stage = match update {
-            UpdateOperationType::ExecutionComplete => {
-                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                    exit_code: 0,
-                    ..Default::default()
-                })
-            }
-            UpdateOperationType::UpdateWithActionStage(stage) => stage,
-            UpdateOperationType::UpdateWithError(ref e) => {
-                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                    exit_code: 1,
-                    error: Some(e.clone()),
-                    ..Default::default()
-                })
-            }
-            UpdateOperationType::UpdateWithDisconnect => {
-                event!(Level::WARN, ?operation_id, "Worker disconnected");
-                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                    exit_code: 1,
-                    ..Default::default()
-                })
-            }
-            UpdateOperationType::KeepAlive => {
-                // Nothing to change for keep-alive.
-                return Ok(());
-            }
-        };
-
-        // Send the final state to all watchers.
-        let completed_state = Arc::new(ActionState {
-            client_operation_id: operation_id.clone(),
-            stage,
-            action_digest,
-            last_transition_timestamp: SystemTime::now(),
-        });
-        drop(state_tx.send(completed_state));
-
-        // Remove the action from active_actions. This also effectively
-        // cancels any pending timeout — the timeout monitor will skip
-        // entries whose operation_id is no longer in the map.
-        actions.remove(operation_id);
-
-        event!(
-            Level::INFO,
-            ?operation_id,
-            "NixWorkerScheduler: Action completed and removed from active actions"
-        );
-
-        Ok(())
+        perform_update_action(&self.active_actions, operation_id, update).await
     }
 
     async fn worker_keep_alive_received(
@@ -763,5 +718,3 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
     RootMetricsComponent for NixScheduler<I, NowFn>
 {
 }
-
-impl RootMetricsComponent for NixWorkerScheduler {}

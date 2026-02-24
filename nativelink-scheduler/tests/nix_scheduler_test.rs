@@ -77,12 +77,14 @@ async fn test_nix_scheduler_action_timeout() -> Result<(), Error> {
     );
 
     let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
+    let cas_store = Store::new(MemoryStore::new(&MemorySpec::default()));
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
         task_change_notify.clone(),
         MockInstantWrapped::default,
         ac_store,
+        cas_store,
     );
 
     // Create a test action with a small timeout (1 second)
@@ -154,6 +156,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         MockInstantWrapped::default,
     );
     let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
+    let cas_store = Store::new(MemoryStore::new(&MemorySpec::default()));
 
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
@@ -161,6 +164,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         task_change_notify,
         MockInstantWrapped::default,
         ac_store,
+        cas_store,
     );
 
     // Call filter_operations with no actions added - should return an empty stream
