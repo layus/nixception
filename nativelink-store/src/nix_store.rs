@@ -22,6 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::BytesMut;
 
+use itertools::Itertools;
 use nativelink_config::stores::NixSpec;
 use nativelink_error::ResultExt;
 use nativelink_error::{Code, Error, make_err};
@@ -61,6 +62,95 @@ impl NixStore {
                 .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string()),
         }))
     }
+
+    pub async fn add_to_store(
+        self: Pin<&Self>,
+        digest: String,
+        content: &[u8],
+        name: &str,
+        inputs: &Vec<StorePath<String>>,
+    ) -> Result<(), Error> {
+        // add to store
+        //let mut nix = NixProxy::new(std::io::stdin(), std::io::stdout());
+
+        let mut client = {
+            let read_socket = UnixStream::connect(self.socket_path.clone())
+                .err_tip(|| format!("While opening socket '{}'", self.socket_path))?;
+            let write_socket = read_socket
+                .try_clone()
+                .err_tip(|| "While cloning nix daemon socket")?;
+            NixDaemonClient::new(read_socket, write_socket)
+                .map_err(|e| make_err!(Code::Internal, "While creating a new NixClient: {}", e))
+        }?;
+
+        //let nix_ca = key_to_ca(&digest)?.to_nix_nixbase32_string();
+        //dbg!(&nix_ca);
+        let add_to_store_op = AddToStore {
+            name: nix_remote::StorePath(name.to_string().into()),
+            cam_str: nix_remote::StorePath(digest.to_owned().into()),
+            // refs: StorePathSet {
+            //     paths: Default::default(),
+            // },
+            refs: StorePathSet {
+                paths: {
+                    let mut paths: Vec<nix_remote::StorePath> = inputs
+                        .into_iter()
+                        .map(|sp| nix_remote::StorePath(sp.to_absolute_path().into()))
+                        .collect();
+                    paths.sort();
+                    paths
+                },
+            },
+            repair: false,
+        };
+        let response_type: Resp<ValidPathInfoWithPath> = Default::default();
+        let add_to_store_worker_op =
+            &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
+
+        let () = client
+            .send_worker_op_to_daemon(add_to_store_worker_op)
+            .map_err(|e| make_err!(Code::Internal, "Sending AddToStore op to daemon: {}", e))?;
+
+        debug_assert!(add_to_store_worker_op.requires_streaming());
+
+        // Stream data
+        let length_of_content = content.len();
+        client
+            .streaming_write_len(length_of_content as u64)
+            .unwrap();
+        client
+            .streaming_write_buff(content.as_ref(), length_of_content)
+            .unwrap();
+        client.streaming_write_len(0).unwrap();
+        client.flush().unwrap();
+
+        // Read errors and response
+        loop {
+            let error_message_from_builder = client.read_error_msg().unwrap();
+            if error_message_from_builder == Msg::Last(()) {
+                break;
+            }
+            dbg!(&error_message_from_builder);
+        }
+
+        // Get reply, finally
+        let _reply = client
+            .read_build_response_from_daemon(&response_type)
+            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
+
+        // Write to nix store was successful, but we need to check that the
+        // content matches the digest in the key. We do not support arbitrary
+        // keys, only sh256 digests of the content.
+        // let () = (_reply.info.content_address.to_string().unwrap() == digest)
+        //     .then_some(())
+        //     .ok_or(make_err!(
+        //         Code::InvalidArgument,
+        //         "Key {:?} does not match the content.",
+        //         &digest
+        //     ))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -74,7 +164,7 @@ impl HealthStatusIndicator for NixStore {
     }
 }
 
-fn key_to_store_path(key: &StoreKey) -> Result<StorePath<String>, Error> {
+pub fn key_to_store_path(key: &StoreKey) -> Result<StorePath<String>, Error> {
     let mykey = key.borrow();
     let digest = mykey.into_digest();
     let PackedHash(hash) = digest.packed_hash();
@@ -88,7 +178,7 @@ fn key_to_store_path(key: &StoreKey) -> Result<StorePath<String>, Error> {
     })
 }
 
-fn key_to_ca(key: &StoreKey) -> Result<CAHash, Error> {
+pub fn key_to_ca(key: &StoreKey) -> Result<CAHash, Error> {
     let StoreKey::Digest(digest) = key else {
         return Err(make_err!(
             Code::InvalidArgument,

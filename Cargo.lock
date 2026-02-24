@@ -2741,6 +2741,7 @@ version = "0.7.10"
 dependencies = [
  "async-lock",
  "async-trait",
+ "bstr",
  "bytes",
  "derivative",
  "fred",
@@ -2754,6 +2755,8 @@ dependencies = [
  "nativelink-proto",
  "nativelink-store",
  "nativelink-util",
+ "nix-compat",
+ "nix-remote",
  "opentelemetry",
  "opentelemetry-semantic-conventions",
  "parking_lot",
