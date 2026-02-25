@@ -14,7 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::once;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nix_compat::derivation::{Derivation, Output};
@@ -22,11 +23,15 @@ use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::StorePath;
 
 use bstr::BString;
+use bytes::Bytes;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_store::nix_store::{NixStore, key_to_store_path};
-use nativelink_util::action_messages::{ActionInfo, ActionStage, OperationId, WorkerId};
+use nativelink_util::action_messages::{
+    ActionInfo, ActionStage, FileInfo, NameOrPath, OperationId, WorkerId,
+};
 use nativelink_util::common::DigestInfo;
+use nativelink_util::digest_hasher::DigestHasher;
 use nativelink_util::operation_state_manager::UpdateOperationType;
 use nativelink_util::store_trait::{Store, StoreKey, StoreLike};
 use tokio::time;
@@ -159,12 +164,13 @@ impl NixWorker {
     /// returning `Ok(())`.  On error an `Err` is returned and the caller
     /// (`run`) is responsible for reporting the failure.
     async fn run_inner(&self) -> Result<(), Error> {
-        let drv_path = self.prepare_derivation().await?;
+        let (drv_path, out_path) = self.prepare_derivation().await?;
 
         // The derivation has been uploaded — transition Queued → Executing.
         event!(
             Level::INFO,
             drv_path = ?drv_path.to_absolute_path(),
+            out_path = ?out_path,
             "Derivation uploaded, marking action as Executing"
         );
         self.update(UpdateOperationType::UpdateWithActionStage(
@@ -190,8 +196,22 @@ impl NixWorker {
             "Build completed"
         );
 
+        // Phase 3 — walk the output directory, upload each file to the
+        // CAS, and collect FileInfo entries for the ActionResult.
+        let output_files = self
+            .collect_output_files(Path::new(&out_path))
+            .await
+            .err_tip(|| format!("Collecting output files from {}", out_path))?;
+
+        event!(
+            Level::INFO,
+            num_output_files = output_files.len(),
+            "Output files collected"
+        );
+
         self.try_update(UpdateOperationType::UpdateWithActionStage(
             ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                output_files,
                 exit_code: 0,
                 ..Default::default()
             }),
@@ -208,8 +228,9 @@ impl NixWorker {
     ///  2. Build a Nix derivation from the inputs
     ///  3. Upload the derivation to the Nix store
     ///
-    /// Returns the derivation store path on success.
-    async fn prepare_derivation(&self) -> Result<StorePath<String>, Error> {
+    /// Returns a tuple of (derivation store path, output store path) on
+    /// success.
+    async fn prepare_derivation(&self) -> Result<(StorePath<String>, String), Error> {
         let command = get_and_decode_digest::<ProtoCommand>(
             &self.cas_store,
             self.action_info.command_digest.into(),
@@ -295,6 +316,18 @@ impl NixWorker {
             .calculate_output_paths("reapi-action", &hash_modulo)
             .map_err(|e| make_err!(Code::Internal, "Failed to calculate output paths: {}", e))?;
 
+        let out_path = derivation
+            .outputs
+            .get("out")
+            .and_then(|o| o.path.as_ref())
+            .map(|sp| sp.to_absolute_path())
+            .ok_or_else(|| {
+                make_err!(
+                    Code::Internal,
+                    "Derivation has no 'out' output path after calculate_output_paths"
+                )
+            })?;
+
         let drv_path = derivation
             .calculate_derivation_path("reapi-action")
             .map_err(|e| make_err!(Code::Internal, "Failed to calculate derivation path: {}", e))?;
@@ -322,7 +355,115 @@ impl NixWorker {
             .await?;
 
         assert_eq!(&path_info.path.0.0, &drv_path.to_absolute_path());
-        Ok(drv_path)
+        Ok((drv_path, out_path))
+    }
+
+    /// Walk the Nix output directory, upload every regular file to the CAS
+    /// store, and return a [`FileInfo`] for each one.
+    ///
+    /// `out_dir` is the absolute path of the derivation's "out" output
+    /// (e.g. `/nix/store/xxx-reapi-action`).
+    async fn collect_output_files(&self, out_dir: &Path) -> Result<Vec<FileInfo>, Error> {
+        let mut files: Vec<FileInfo> = Vec::new();
+        self.walk_and_upload(out_dir, out_dir, &mut files).await?;
+        Ok(files)
+    }
+
+    /// Recursively walk `current_dir`, uploading each regular file to the
+    /// CAS and appending a [`FileInfo`] to `files`.  Paths in the
+    /// resulting `FileInfo` entries are relative to `root_dir`.
+    async fn walk_and_upload(
+        &self,
+        root_dir: &Path,
+        current_dir: &Path,
+        files: &mut Vec<FileInfo>,
+    ) -> Result<(), Error> {
+        let mut read_dir = tokio::fs::read_dir(current_dir).await.map_err(|e| {
+            make_err!(
+                Code::Internal,
+                "Failed to read directory {}: {}",
+                current_dir.display(),
+                e
+            )
+        })?;
+
+        while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
+            make_err!(
+                Code::Internal,
+                "Failed to read dir entry in {}: {}",
+                current_dir.display(),
+                e
+            )
+        })? {
+            let file_type = entry.file_type().await.map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Failed to get file type for {:?}: {}",
+                    entry.path(),
+                    e
+                )
+            })?;
+
+            let path = entry.path();
+
+            if file_type.is_dir() {
+                Box::pin(self.walk_and_upload(root_dir, &path, files)).await?;
+            } else if file_type.is_file() {
+                let relative_path = path
+                    .strip_prefix(root_dir)
+                    .map_err(|e| {
+                        make_err!(
+                            Code::Internal,
+                            "Failed to strip prefix {} from {}: {}",
+                            root_dir.display(),
+                            path.display(),
+                            e
+                        )
+                    })?
+                    .to_string_lossy()
+                    .into_owned();
+
+                let content = tokio::fs::read(&path).await.map_err(|e| {
+                    make_err!(
+                        Code::Internal,
+                        "Failed to read file {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+
+                let metadata = entry.metadata().await.map_err(|e| {
+                    make_err!(
+                        Code::Internal,
+                        "Failed to read metadata for {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+                let is_executable = metadata.permissions().mode() & 0o111 != 0;
+
+                // Compute the digest of the file content.
+                let digest_function = self.action_info.unique_qualifier.digest_function();
+                let mut hasher = digest_function.hasher();
+                hasher.update(&content);
+                let digest = hasher.finalize_digest();
+
+                // Upload the file content to the CAS keyed by its digest.
+                self.cas_store
+                    .update_oneshot(StoreKey::Digest(digest), Bytes::from(content))
+                    .await
+                    .err_tip(|| format!("Uploading output file {} to CAS", relative_path))?;
+
+                files.push(FileInfo {
+                    name_or_path: NameOrPath::Path(relative_path),
+                    digest,
+                    is_executable,
+                });
+            }
+            // Symlinks and other special files are silently skipped.
+        }
+
+        Ok(())
     }
 
     /// Recursively walk a CAS directory tree and collect every file as a
