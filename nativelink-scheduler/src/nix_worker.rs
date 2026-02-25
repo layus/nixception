@@ -165,7 +165,6 @@ impl NixWorker {
         event!(
             Level::INFO,
             drv_path = ?drv_path.to_absolute_path(),
-            operation_id = ?self.operation_id,
             "Derivation uploaded, marking action as Executing"
         );
         self.update(UpdateOperationType::UpdateWithActionStage(
@@ -176,6 +175,9 @@ impl NixWorker {
         // Phase 2 — TODO: build the derivation / wait for the build to
         // finish and collect outputs.  This is not yet implemented; for now
         // we immediately mark the action as completed.
+
+        // TODO: let out_path = self.build_derivation(drv_path).await?;
+
         self.try_update(UpdateOperationType::UpdateWithActionStage(
             ActionStage::Completed(nativelink_util::action_messages::ActionResult {
                 exit_code: 0,
@@ -216,12 +218,25 @@ impl NixWorker {
             .iter()
             .map(|e| {
                 format!(
-                    "mkdir -p $(dirname {path})\nln {store_path} {path}",
+                    "mkdir -p $(dirname {path})\nln {store_path} {path} || cp {store_path} {path} --no-preserve=all",
                     path = e.path.to_string_lossy(),
                     store_path = e.store_path.to_absolute_path()
                 )
             })
+            .chain(command.environment_variables.into_iter().map(|var| {
+                format!("export {name}='{value}'", name = var.name, value = var.value)
+            }))
             .chain(once(command.arguments.join(" ")))
+            .chain(once("mkdir -p $out".into()))
+            .chain(command.output_directories.into_iter().map(|dir| {
+                format!("cp --parents -r {dir} $out")
+            }))
+            .chain(command.output_files.into_iter().map(|file| {
+                format!("cp --parents {file} $out")
+            }))
+            .chain(command.output_paths.into_iter().map(|path| {
+                format!("cp --parents {path} $out")
+            }))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -230,27 +245,29 @@ impl NixWorker {
             ("script".into(), BString::new(script.as_bytes().to_vec())),
             ("out".into(), BString::default()),
         ]);
+
         let builder_path: StorePath<&str> = StorePath::from_absolute_path_full(
-            "/nix/store/03r3ipfa69l8nla101khyw3g67j24357-bash-5.3p9.drv",
+            "/nix/store/hmy8rl9msg5wmvbzgq2sy9yrwvvm10ig-runner.drv",
         )
         .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?
         .0;
         let builder_hash: [u8; 32] = [
-            148, 82, 165, 89, 140, 175, 83, 34, 16, 61, 21, 144, 125, 83, 22, 252, 171, 33, 140,
-            108, 140, 218, 28, 83, 107, 67, 174, 18, 43, 166, 173, 163,
+            95, 148, 113, 92, 234, 230, 14, 255, 41, 235, 158, 201, 209, 193, 72, 39, 43, 158, 117,
+            18, 65, 81, 255, 48, 142, 184, 249, 84, 255, 69, 163, 171,
         ];
+
         let builder_info = self
             .cas_store
             .downcast_ref::<NixStore>(None)
             .unwrap()
             .as_pin()
-            .query_path_info("/nix/store/f15k3dpilmiyv6zgpib289rnjykgr1r4-bash-5.3p9")?
+            .query_path_info("/nix/store/ramr9g2186x57rv2pv0bvd8ya159r970-runner")?
             .ok_or(make_err!(Code::Internal, "Could not query path info"))?;
         let builder_deriver = StorePath::from_absolute_path(&builder_info.deriver.0.0)
             .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?;
         let mut derivation: Derivation = Derivation {
-            arguments: vec!["-ec".into(), "eval \"$script\"".into()],
-            builder: "/nix/store/f15k3dpilmiyv6zgpib289rnjykgr1r4-bash-5.3p9/bin/bash".into(),
+            arguments: vec!["set -x; eval \"$script\"".into()],
+            builder: "/nix/store/ramr9g2186x57rv2pv0bvd8ya159r970-runner/bin/runner".into(),
             environment,
             input_derivations: BTreeMap::from([(builder_deriver, BTreeSet::from(["out".into()]))]),
             input_sources: entries.iter().map(|e| e.store_path.to_owned()).collect(),
