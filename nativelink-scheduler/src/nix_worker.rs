@@ -477,14 +477,10 @@ impl NixWorker {
                     .to_string_lossy()
                     .into_owned();
 
-                let content = tokio::fs::read(&path).await.map_err(|e| {
-                    make_err!(
-                        Code::Internal,
-                        "Failed to read file {}: {}",
-                        path.display(),
-                        e
-                    )
-                })?;
+                let digest = self
+                    .upload_file_to_cas(&path)
+                    .await
+                    .err_tip(|| format!("Uploading output file {} to CAS", relative_path))?;
 
                 let metadata = entry.metadata().await.map_err(|e| {
                     make_err!(
@@ -495,18 +491,6 @@ impl NixWorker {
                     )
                 })?;
                 let is_executable = metadata.permissions().mode() & 0o111 != 0;
-
-                // Compute the digest of the file content.
-                let digest_function = self.action_info.unique_qualifier.digest_function();
-                let mut hasher = digest_function.hasher();
-                hasher.update(&content);
-                let digest = hasher.finalize_digest();
-
-                // Upload the file content to the CAS keyed by its digest.
-                self.cas_store
-                    .update_oneshot(StoreKey::Digest(digest), Bytes::from(content))
-                    .await
-                    .err_tip(|| format!("Uploading output file {} to CAS", relative_path))?;
 
                 files.push(FileInfo {
                     name_or_path: NameOrPath::Path(relative_path),
