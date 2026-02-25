@@ -109,7 +109,7 @@ async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
 
     // Should be able to find the action using filter_operations
     let filter = OperationFilter {
-        operation_id: Some(client_operation_id.clone()),
+        client_operation_id: Some(client_operation_id.clone()),
         stages: OperationStageFlags::Queued,
         ..Default::default()
     };
@@ -123,8 +123,15 @@ async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
 
     // Wait for the background task to complete — it will fail because the
     // CAS is empty and transition the action straight to Completed.
-    let (state, _) = action_result.changed().await?;
-    match &state.stage {
+    // The first `changed()` may return the initial Queued state (from the
+    // subscriber's `mark_changed`), so loop until we reach a terminal stage.
+    let final_state = loop {
+        let (state, _) = action_result.changed().await?;
+        if state.stage.is_finished() {
+            break state;
+        }
+    };
+    match &final_state.stage {
         ActionStage::Completed(result) => {
             assert_eq!(
                 result.exit_code, 1,

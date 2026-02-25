@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::iter::once;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
@@ -26,107 +25,18 @@ use bstr::BString;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_store::nix_store::{NixStore, key_to_store_path};
-use nativelink_util::action_messages::{ActionInfo, ActionStage, ActionState, OperationId};
+use nativelink_util::action_messages::{ActionInfo, ActionStage, OperationId, WorkerId};
 use nativelink_util::common::DigestInfo;
 use nativelink_util::operation_state_manager::UpdateOperationType;
 use nativelink_util::store_trait::{Store, StoreKey, StoreLike};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::time;
 use tracing::{Level, event};
 
 use nativelink_proto::build::bazel::remote::execution::v2::{
     Command as ProtoCommand, Directory as ProtoDirectory,
 };
 
-use crate::nix_scheduler::ActiveActionsMap;
-
-/// Returns `true` if the given stage is terminal (the action is done and
-/// should be removed from `active_actions`).
-fn is_terminal_stage(stage: &ActionStage) -> bool {
-    matches!(
-        stage,
-        ActionStage::Completed(_) | ActionStage::CompletedFromCache(_)
-    )
-}
-
-/// Apply a state-transition update to an active action in the shared map.
-///
-/// * For intermediate stages (e.g. `Executing`) the state is broadcast to
-///   all watchers but the operation stays in `active_actions`.
-/// * For terminal stages (`Completed`, `CompletedFromCache`, errors, …)
-///   the state is broadcast **and** the operation is removed from
-///   `active_actions` so that the timeout monitor will skip it.
-///
-/// This is a free function so that both [`NixWorker`] and the scheduler's
-/// `WorkerScheduler::update_action` implementation can call it without
-/// needing a full `NixWorker` instance.
-pub(crate) async fn try_update_action(
-    active_actions: &Arc<TokioMutex<ActiveActionsMap>>,
-    operation_id: &OperationId,
-    update: UpdateOperationType,
-) -> Result<(), Error> {
-    let mut actions = active_actions.lock().await;
-    let active_action = actions.get(operation_id).ok_or_else(|| {
-        make_err!(
-            Code::NotFound,
-            "Operation {:?} not found in active actions",
-            operation_id
-        )
-    })?;
-
-    let action_digest = active_action.action_info.digest();
-
-    // Map the update type to an ActionStage.
-    let stage = match update {
-        UpdateOperationType::ExecutionComplete => {
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 0,
-                ..Default::default()
-            })
-        }
-        UpdateOperationType::UpdateWithActionStage(stage) => stage,
-        UpdateOperationType::UpdateWithError(ref e) => {
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 1,
-                error: Some(e.clone()),
-                ..Default::default()
-            })
-        }
-        UpdateOperationType::UpdateWithDisconnect => {
-            event!(Level::WARN, ?operation_id, "Worker disconnected");
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                exit_code: 1,
-                ..Default::default()
-            })
-        }
-        UpdateOperationType::KeepAlive => {
-            return Ok(());
-        }
-    };
-
-    let terminal = is_terminal_stage(&stage);
-
-    // Broadcast the new state to all watchers.
-    let new_state = Arc::new(ActionState {
-        client_operation_id: operation_id.clone(),
-        stage,
-        action_digest,
-        last_transition_timestamp: SystemTime::now(),
-    });
-    drop(active_action.state_tx.send(new_state));
-
-    // Only remove on terminal stages. The timeout monitor will skip
-    // entries whose operation_id is no longer in the map.
-    if terminal {
-        actions.remove(operation_id);
-        event!(
-            Level::INFO,
-            ?operation_id,
-            "Action completed and removed from active actions"
-        );
-    }
-
-    Ok(())
-}
+use crate::worker_scheduler::WorkerScheduler;
 
 #[derive(Clone, Debug)]
 struct PathEntry {
@@ -135,15 +45,17 @@ struct PathEntry {
 }
 
 /// A worker that executes a single action end-to-end, reporting every state
-/// transition back to the scheduler through the shared `active_actions` map.
+/// transition back to the scheduler through the [`WorkerStateManager`].
 ///
 /// Created by the scheduler in [`NixScheduler::create_running_action`] and
 /// then spawned via [`NixWorker::run`].
 pub(crate) struct NixWorker {
-    /// Shared active-actions map (same instance as the scheduler).
-    active_actions: Arc<TokioMutex<ActiveActionsMap>>,
-    /// The operation this worker is executing.
-    pub(crate) operation_id: OperationId,
+    /// The state manager shared with the scheduler, used to update action state.
+    worker_scheduler: Arc<dyn WorkerScheduler>,
+    /// A synthetic worker id assigned to this nix worker instance.
+    worker_id: WorkerId,
+    /// The operation this worker is executing (assigned by the db).
+    operation_id: OperationId,
     /// CAS store used to fetch action inputs and upload derivations.
     cas_store: Store,
     /// The action metadata describing what to execute.
@@ -152,13 +64,15 @@ pub(crate) struct NixWorker {
 
 impl NixWorker {
     pub(crate) fn new(
-        active_actions: Arc<TokioMutex<ActiveActionsMap>>,
+        worker_scheduler: Arc<dyn WorkerScheduler>,
+        worker_id: WorkerId,
         operation_id: OperationId,
         cas_store: Store,
         action_info: Arc<ActionInfo>,
     ) -> Self {
         Self {
-            active_actions,
+            worker_scheduler,
+            worker_id,
             operation_id,
             cas_store,
             action_info,
@@ -168,9 +82,11 @@ impl NixWorker {
     // ----- state-transition helpers -----
 
     /// Send a state update, returning an error if the operation is no longer
-    /// in the active map (e.g. it was already timed-out or cancelled).
+    /// in the db (e.g. it was already timed-out or cancelled).
     async fn try_update(&self, update: UpdateOperationType) -> Result<(), Error> {
-        try_update_action(&self.active_actions, &self.operation_id, update).await
+        self.worker_scheduler
+            .update_action(&self.worker_id, &self.operation_id, update)
+            .await
     }
 
     /// Fire-and-forget update: sends the update and logs any error internally.
@@ -195,9 +111,37 @@ impl NixWorker {
     ///  4. TODO: build the derivation and collect outputs.
     ///  5. Mark the action as completed.
     ///
+    /// The action's timeout (from [`ActionInfo::timeout`]) is enforced with
+    /// [`tokio::time::timeout`].  On timeout the action is marked as
+    /// completed with exit code 124 (the standard timeout exit code).
+    ///
     /// All outcomes (success, error, timeout) are communicated exclusively
-    /// via the shared `active_actions` map — this method returns nothing.
+    /// via the [`WorkerStateManager`] — this method returns nothing.
     pub(crate) async fn run(self) {
+        let timeout_duration = self.action_info.timeout;
+        match time::timeout(timeout_duration, self.run_inner()).await {
+            Ok(()) => { /* run_inner handled all state transitions */ }
+            Err(_elapsed) => {
+                event!(
+                    Level::WARN,
+                    operation_id = ?self.operation_id,
+                    ?timeout_duration,
+                    "Action timed out"
+                );
+                let timeout_result = nativelink_util::action_messages::ActionResult {
+                    exit_code: 124,
+                    ..Default::default()
+                };
+                self.update(UpdateOperationType::UpdateWithActionStage(
+                    ActionStage::Completed(timeout_result),
+                ))
+                .await;
+            }
+        }
+    }
+
+    /// The actual execution logic, called inside a timeout wrapper.
+    async fn run_inner(&self) {
         let result = self.prepare_derivation().await;
         let drv_path = match result {
             Ok(path) => path,
@@ -222,7 +166,13 @@ impl NixWorker {
         // Phase 2 — TODO: build the derivation / wait for the build to
         // finish and collect outputs.  This is not yet implemented; for now
         // we immediately mark the action as completed.
-        self.update(UpdateOperationType::ExecutionComplete).await;
+        self.update(UpdateOperationType::UpdateWithActionStage(
+            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                exit_code: 0,
+                ..Default::default()
+            }),
+        ))
+        .await;
     }
 
     // ----- derivation helpers -----
