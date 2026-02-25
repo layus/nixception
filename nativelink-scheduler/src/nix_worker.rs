@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter::once;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_store::nix_store::{NixStore, key_to_store_path};
 use nativelink_util::action_messages::{
-    ActionInfo, ActionStage, FileInfo, NameOrPath, OperationId, WorkerId,
+    ActionInfo, ActionStage, ExecutionMetadata, FileInfo, NameOrPath, OperationId, WorkerId,
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasher;
@@ -238,7 +238,13 @@ impl NixWorker {
                 exit_code,
                 stdout_digest,
                 stderr_digest,
-                ..Default::default()
+                output_folders: vec![],
+                output_directory_symlinks: vec![],
+                output_file_symlinks: vec![],
+                execution_metadata: Default::default(),
+                server_logs: HashMap::new(),
+                error: None,
+                message: String::new(),
             }),
         ))
         .await?;
