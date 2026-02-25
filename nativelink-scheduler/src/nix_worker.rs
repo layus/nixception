@@ -119,8 +119,22 @@ impl NixWorker {
     /// via the [`WorkerStateManager`] — this method returns nothing.
     pub(crate) async fn run(self) {
         let timeout_duration = self.action_info.timeout;
-        match time::timeout(timeout_duration, self.run_inner()).await {
-            Ok(()) => { /* run_inner handled all state transitions */ }
+        let result = time::timeout(timeout_duration, self.run_inner()).await;
+
+        let stage = match result {
+            Ok(Ok(())) => return, // run_inner already sent the Completed update
+            Ok(Err(e)) => {
+                event!(
+                    Level::ERROR,
+                    error = ?e,
+                    operation_id = ?self.operation_id,
+                    "Action failed"
+                );
+                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
+                    error: Some(e),
+                    ..Default::default()
+                })
+            }
             Err(_elapsed) => {
                 event!(
                     Level::WARN,
@@ -128,28 +142,24 @@ impl NixWorker {
                     ?timeout_duration,
                     "Action timed out"
                 );
-                let timeout_result = nativelink_util::action_messages::ActionResult {
+                ActionStage::Completed(nativelink_util::action_messages::ActionResult {
                     exit_code: 124,
                     ..Default::default()
-                };
-                self.update(UpdateOperationType::UpdateWithActionStage(
-                    ActionStage::Completed(timeout_result),
-                ))
-                .await;
+                })
             }
-        }
+        };
+
+        self.update(UpdateOperationType::UpdateWithActionStage(stage))
+            .await;
     }
 
     /// The actual execution logic, called inside a timeout wrapper.
-    async fn run_inner(&self) {
-        let result = self.prepare_derivation().await;
-        let drv_path = match result {
-            Ok(path) => path,
-            Err(e) => {
-                self.update(UpdateOperationType::UpdateWithError(e)).await;
-                return;
-            }
-        };
+    ///
+    /// On success the action is marked as [`ActionStage::Completed`] before
+    /// returning `Ok(())`.  On error an `Err` is returned and the caller
+    /// (`run`) is responsible for reporting the failure.
+    async fn run_inner(&self) -> Result<(), Error> {
+        let drv_path = self.prepare_derivation().await?;
 
         // The derivation has been uploaded — transition Queued → Executing.
         event!(
@@ -166,13 +176,15 @@ impl NixWorker {
         // Phase 2 — TODO: build the derivation / wait for the build to
         // finish and collect outputs.  This is not yet implemented; for now
         // we immediately mark the action as completed.
-        self.update(UpdateOperationType::UpdateWithActionStage(
+        self.try_update(UpdateOperationType::UpdateWithActionStage(
             ActionStage::Completed(nativelink_util::action_messages::ActionResult {
                 exit_code: 0,
                 ..Default::default()
             }),
         ))
-        .await;
+        .await?;
+
+        Ok(())
     }
 
     // ----- derivation helpers -----

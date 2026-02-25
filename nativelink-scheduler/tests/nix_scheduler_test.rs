@@ -26,7 +26,8 @@ use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_fa
 use nativelink_scheduler::nix_scheduler::NixScheduler;
 use nativelink_store::memory_store::MemoryStore;
 use nativelink_util::action_messages::{
-    ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, OperationId,
+    ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, INTERNAL_ERROR_EXIT_CODE,
+    OperationId,
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
@@ -134,8 +135,8 @@ async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
     match &final_state.stage {
         ActionStage::Completed(result) => {
             assert_eq!(
-                result.exit_code, 1,
-                "Expected error exit code 1 (derivation preparation failed)"
+                result.exit_code, INTERNAL_ERROR_EXIT_CODE,
+                "Expected INTERNAL_ERROR_EXIT_CODE (derivation preparation failed)"
             );
             assert!(
                 result.error.is_some(),

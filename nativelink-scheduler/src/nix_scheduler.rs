@@ -43,6 +43,10 @@ const DEFAULT_NO_EVENT_ACTION_TIMEOUT_S: u64 = 60;
 /// Default client action timeout in seconds.
 const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 120;
 
+// ---------------------------------------------------------------------------
+// NixScheduler
+// ---------------------------------------------------------------------------
+
 /// A simplified Nix scheduler that executes actions by building Nix
 /// derivations.
 ///
@@ -50,6 +54,11 @@ const DEFAULT_CLIENT_ACTION_TIMEOUT_S: u64 = 120;
 /// from clients) and [`WorkerScheduler`] (for receiving execution-status
 /// updates).  All action state is managed through a
 /// [`SimpleSchedulerStateManager`] which owns the [`AwaitedActionDb`].
+///
+/// The state manager is the single source of truth for action state.  The
+/// scheduler uses [`SimpleSchedulerStateManager::resolve_internal_operation_id`]
+/// to obtain the DB-internal operation id after adding an action (the
+/// client-facing [`ActionStateResult`] deliberately hides the internal id).
 #[derive(MetricsComponent)]
 pub struct NixScheduler<
     A: AwaitedActionDb,
@@ -173,14 +182,15 @@ impl<
             .err_tip(|| "In NixScheduler::create_running_action")?;
 
         // Retrieve the internal operation_id assigned by the db.
-        // `SimpleSchedulerStateManager` sets `ActionState.client_operation_id`
-        // to the db's operation_id (see `AwaitedAction::new`), so we can read
-        // it from `as_state()`.
-        let (state, _) = action_state_result
-            .as_state()
+        //
+        // The client-facing `ActionStateResult` deliberately masks the
+        // internal operation id with the client operation id, so we ask
+        // the state manager to resolve it for us.
+        let operation_id = self
+            .state_manager
+            .resolve_internal_operation_id(&client_operation_id)
             .await
-            .err_tip(|| "In NixScheduler::create_running_action getting state")?;
-        let operation_id = state.client_operation_id.clone();
+            .err_tip(|| "In NixScheduler::create_running_action resolving internal operation id")?;
 
         // Create a synthetic worker id for this nix worker instance.
         let worker_id = WorkerId(format!("nix-worker-{operation_id}"));

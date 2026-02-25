@@ -625,6 +625,35 @@ where
             .err_tip(|| "In SimpleSchedulerStateManager::add_operation")
     }
 
+    /// Resolve a client operation id to the DB-internal operation id.
+    ///
+    /// The client-facing [`ActionStateResult`] deliberately masks the
+    /// internal operation id with the client operation id.  This helper
+    /// looks up the action in the DB and returns the real internal id so
+    /// that callers (e.g. the Nix scheduler) can pass it to workers that
+    /// need to call [`WorkerStateManager::update_operation`].
+    pub async fn resolve_internal_operation_id(
+        &self,
+        client_operation_id: &OperationId,
+    ) -> Result<OperationId, Error> {
+        let subscriber = self
+            .action_db
+            .get_awaited_action_by_id(client_operation_id)
+            .await
+            .err_tip(|| "In SimpleSchedulerStateManager::resolve_internal_operation_id")?
+            .ok_or_else(|| {
+                make_err!(
+                    Code::NotFound,
+                    "No action found for client_operation_id {client_operation_id} in resolve_internal_operation_id"
+                )
+            })?;
+        let awaited_action = subscriber
+            .borrow()
+            .await
+            .err_tip(|| "In SimpleSchedulerStateManager::resolve_internal_operation_id borrow")?;
+        Ok(awaited_action.operation_id().clone())
+    }
+
     async fn inner_filter_operations<'a, F>(
         &'a self,
         filter: OperationFilter,
