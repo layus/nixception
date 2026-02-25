@@ -36,6 +36,7 @@ use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::Store;
 
 use tokio::sync::{Mutex as TokioMutex, Notify, watch};
+use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::awaited_action_db::AwaitedActionDb;
@@ -44,9 +45,20 @@ use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
 
+/// A single in-flight action tracked by the scheduler.
+pub(crate) struct ActiveNixAction {
+    /// The original action request metadata.
+    pub(crate) action_info: Arc<ActionInfo>,
+    /// Watch-channel sender used to broadcast state transitions to subscribers.
+    pub(crate) state_tx: watch::Sender<Arc<ActionState>>,
+    /// Handle to the background task that is executing this action.
+    /// Can be used to abort the task on timeout or cancellation.
+    #[allow(dead_code)]
+    pub(crate) join_handle: JoinHandle<()>,
+}
+
 /// Type alias for the shared active-actions map used throughout the scheduler.
-pub(crate) type ActiveActionsMap =
-    HashMap<OperationId, (Arc<ActionInfo>, watch::Sender<Arc<ActionState>>)>;
+pub(crate) type ActiveActionsMap = HashMap<OperationId, ActiveNixAction>;
 
 // Struct to implement ActionStateResult for Nix scheduler
 struct NixActionStateResult {
@@ -247,7 +259,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
                 let entry = queue.pop().unwrap();
                 let op_id = &entry.operation_id;
-                if let Some((action_info, state_tx)) = actions.get(op_id) {
+                if let Some(active_action) = actions.get(op_id) {
                     // Create timeout result (exit code 124 is standard for timeout)
                     let timeout_result = nativelink_util::action_messages::ActionResult {
                         exit_code: 124,
@@ -255,7 +267,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                     };
 
                     // Update the action state
-                    let action_digest = action_info.digest();
+                    let action_digest = active_action.action_info.digest();
                     let completed_state = Arc::new(ActionState {
                         client_operation_id: op_id.clone(),
                         stage: ActionStage::Completed(timeout_result),
@@ -264,7 +276,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                     });
 
                     // Send the update
-                    state_tx.send(completed_state).unwrap();
+                    active_action.state_tx.send(completed_state).unwrap();
                 }
             }
         }
@@ -291,9 +303,27 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         // Create a watch channel with the running state
         let (tx, rx) = watch::channel(queued_state);
 
+        // Spawn the action execution as a background task.
+        // All state transitions are handled inside `execute_action` via
+        // the `ActionUpdater`.
+        let updater = ActionUpdater::new(self.active_actions.clone(), client_operation_id.clone());
+        let join_handle = tokio::spawn(execute_action(
+            self.cas_store.clone(),
+            updater,
+            action_info.clone(),
+        ));
+
+        // Insert the action into the active map.  We hold no lock across
+        // the spawn — `tokio::spawn` returns immediately, and the spawned
+        // task will need to acquire the lock before it can call `try_update`,
+        // so the entry will be present by then.
         self.active_actions.lock().await.insert(
             client_operation_id.clone(),
-            (action_info.clone(), tx.clone()),
+            ActiveNixAction {
+                action_info: action_info.clone(),
+                state_tx: tx.clone(),
+                join_handle,
+            },
         );
 
         // Add the action to the timeout queue
@@ -304,16 +334,6 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
 
         // Notify the timeout monitor task
         self.task_change_notify.notify_one();
-
-        // Spawn the action execution as a fire-and-forget background task.
-        // All state transitions are handled inside `execute_action` via
-        // the `ActionUpdater`.
-        let updater = ActionUpdater::new(self.active_actions.clone(), client_operation_id.clone());
-        tokio::spawn(execute_action(
-            self.cas_store.clone(),
-            updater,
-            action_info.clone(),
-        ));
 
         Box::new(NixActionStateResult {
             client_operation_id,
@@ -347,7 +367,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         // Apply filters
         let matches = actions
             .iter()
-            .filter_map(|(op_id, (action_info, state_tx))| {
+            .filter_map(|(op_id, active_action)| {
                 // Filter by operation_id if specified
                 if let Some(filter_op_id) = &filter.operation_id {
                     if filter_op_id != op_id {
@@ -356,7 +376,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                 }
 
                 // Filter by stage if specified
-                let state = state_tx.borrow();
+                let state = active_action.state_tx.borrow();
                 let current_stage_flag = match &state.stage {
                     ActionStage::Queued => OperationStageFlags::Queued,
                     ActionStage::Executing => OperationStageFlags::Executing,
@@ -371,10 +391,10 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
                 }
 
                 // Create a new ActionStateResult for the matched operation
-                let rx = state_tx.subscribe();
+                let rx = active_action.state_tx.subscribe();
                 let result: Box<dyn ActionStateResult> = Box::new(NixActionStateResult {
                     client_operation_id: op_id.clone(),
-                    action_info: action_info.clone(),
+                    action_info: active_action.action_info.clone(),
                     state_rx: rx,
                 });
                 Some(result)

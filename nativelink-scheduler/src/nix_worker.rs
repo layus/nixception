@@ -76,7 +76,7 @@ impl ActionUpdater {
     ///   `active_actions` so that the timeout monitor will skip it.
     pub(crate) async fn try_update(&self, update: UpdateOperationType) -> Result<(), Error> {
         let mut actions = self.active_actions.lock().await;
-        let (action_info, state_tx) = actions.get(&self.operation_id).ok_or_else(|| {
+        let active_action = actions.get(&self.operation_id).ok_or_else(|| {
             make_err!(
                 Code::NotFound,
                 "Operation {:?} not found in active actions",
@@ -84,7 +84,7 @@ impl ActionUpdater {
             )
         })?;
 
-        let action_digest = action_info.digest();
+        let action_digest = active_action.action_info.digest();
 
         // Map the update type to an ActionStage.
         let stage = match update {
@@ -123,7 +123,7 @@ impl ActionUpdater {
             action_digest,
             last_transition_timestamp: SystemTime::now(),
         });
-        drop(state_tx.send(new_state));
+        drop(active_action.state_tx.send(new_state));
 
         // Only remove on terminal stages. The timeout monitor will skip
         // entries whose operation_id is no longer in the map.
