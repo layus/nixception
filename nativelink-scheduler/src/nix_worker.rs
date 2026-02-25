@@ -196,23 +196,48 @@ impl NixWorker {
             "Build completed"
         );
 
-        // Phase 3 — walk the output directory, upload each file to the
-        // CAS, and collect FileInfo entries for the ActionResult.
-        let output_files = self
-            .collect_output_files(Path::new(&out_path))
+        // Phase 3 — read exit code, upload stdout/stderr, walk the
+        // outputs sub-directory, and build the ActionResult.
+        let out_dir = Path::new(&out_path);
+
+        // Read the exit code produced by the script.
+        let exit_code: i32 = tokio::fs::read_to_string(out_dir.join("exitcode"))
             .await
-            .err_tip(|| format!("Collecting output files from {}", out_path))?;
+            .map_err(|e| make_err!(Code::Internal, "Failed to read exitcode: {}", e))?
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| make_err!(Code::Internal, "Failed to parse exitcode: {}", e))?;
+
+        // Upload stdout and stderr to the CAS and obtain their digests.
+        let stdout_digest = self
+            .upload_file_to_cas(&out_dir.join("stdout"))
+            .await
+            .err_tip(|| "Uploading stdout to CAS")?;
+        let stderr_digest = self
+            .upload_file_to_cas(&out_dir.join("stderr"))
+            .await
+            .err_tip(|| "Uploading stderr to CAS")?;
+
+        // Walk $out/outputs/ and collect FileInfo entries.
+        let outputs_dir = out_dir.join("outputs");
+        let output_files = self
+            .collect_output_files(&outputs_dir)
+            .await
+            .err_tip(|| format!("Collecting output files from {}", outputs_dir.display()))?;
 
         event!(
             Level::INFO,
             num_output_files = output_files.len(),
+            exit_code,
             "Output files collected"
         );
 
         self.try_update(UpdateOperationType::UpdateWithActionStage(
             ActionStage::Completed(nativelink_util::action_messages::ActionResult {
                 output_files,
-                exit_code: 0,
+                exit_code,
+                stdout_digest,
+                stderr_digest,
                 ..Default::default()
             }),
         ))
@@ -259,16 +284,25 @@ impl NixWorker {
             .chain(command.environment_variables.into_iter().map(|var| {
                 format!("export {name}='{value}'", name = var.name, value = var.value)
             }))
-            .chain(once(command.arguments.join(" ")))
-            .chain(once("mkdir -p $out".into()))
+            // Create output directory structure before running the command
+            // so that stdout/stderr redirections have a target.
+            .chain(once("mkdir -p $out/outputs".into()))
+            // Run the actual command, capturing stdout and stderr.
+            .chain(once(format!(
+                "{cmd} >$out/stdout 2>$out/stderr\necho $? >$out/exitcode",
+                cmd = command.arguments.join(" ")
+            )))
+            // Copy outputs into $out/outputs/. Use || true so that
+            // missing outputs do not cause the nix build to fail — the
+            // real exit code is already saved in $out/exitcode.
             .chain(command.output_directories.into_iter().map(|dir| {
-                format!("cp --parents -r {dir} $out")
+                format!("cp --parents -r {dir} $out/outputs || true")
             }))
             .chain(command.output_files.into_iter().map(|file| {
-                format!("cp --parents {file} $out")
+                format!("cp --parents {file} $out/outputs || true")
             }))
             .chain(command.output_paths.into_iter().map(|path| {
-                format!("cp --parents {path} $out")
+                format!("cp --parents {path} $out/outputs || true")
             }))
             .collect::<Vec<_>>()
             .join("\n");
@@ -358,11 +392,31 @@ impl NixWorker {
         Ok((drv_path, out_path))
     }
 
+    /// Read a file from disk, upload it to the CAS store, and return its
+    /// digest.
+    async fn upload_file_to_cas(&self, path: &Path) -> Result<DigestInfo, Error> {
+        let content = tokio::fs::read(path)
+            .await
+            .map_err(|e| make_err!(Code::Internal, "Failed to read {}: {}", path.display(), e))?;
+
+        let digest_function = self.action_info.unique_qualifier.digest_function();
+        let mut hasher = digest_function.hasher();
+        hasher.update(&content);
+        let digest = hasher.finalize_digest();
+
+        self.cas_store
+            .update_oneshot(StoreKey::Digest(digest), Bytes::from(content))
+            .await
+            .err_tip(|| format!("Uploading {} to CAS", path.display()))?;
+
+        Ok(digest)
+    }
+
     /// Walk the Nix output directory, upload every regular file to the CAS
     /// store, and return a [`FileInfo`] for each one.
     ///
-    /// `out_dir` is the absolute path of the derivation's "out" output
-    /// (e.g. `/nix/store/xxx-reapi-action`).
+    /// `out_dir` is the absolute path of the derivation's outputs
+    /// sub-directory (e.g. `/nix/store/xxx-reapi-action/outputs`).
     async fn collect_output_files(&self, out_dir: &Path) -> Result<Vec<FileInfo>, Error> {
         let mut files: Vec<FileInfo> = Vec::new();
         self.walk_and_upload(out_dir, out_dir, &mut files).await?;
