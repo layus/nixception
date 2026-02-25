@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::once;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
 use nativelink_store::nix_store::{NixStore, key_to_store_path};
 use nativelink_util::action_messages::{
-    ActionInfo, ActionStage, ExecutionMetadata, FileInfo, NameOrPath, OperationId, WorkerId,
+    ActionInfo, ActionStage, FileInfo, NameOrPath, OperationId, WorkerId,
 };
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasher;
@@ -178,7 +178,21 @@ impl NixWorker {
         ))
         .await;
 
-        // Phase 2 — build the derivation and wait for results.
+        self.execute_derivation(&drv_path).await?;
+
+        let action_result = self.collect_action_result(Path::new(&out_path)).await?;
+
+        self.try_update(UpdateOperationType::UpdateWithActionStage(
+            ActionStage::Completed(action_result),
+        ))
+        .await?;
+
+        Ok(())
+    }
+
+    /// Build the derivation by sending it to the nix daemon and waiting
+    /// for completion.
+    async fn execute_derivation(&self, drv_path: &StorePath<String>) -> Result<(), Error> {
         let drv_abs_path = drv_path.to_absolute_path();
         let nix_store = self
             .cas_store
@@ -196,10 +210,20 @@ impl NixWorker {
             "Build completed"
         );
 
-        // Phase 3 — read exit code, upload stdout/stderr, walk the
-        // outputs sub-directory, and build the ActionResult.
-        let out_dir = Path::new(&out_path);
+        Ok(())
+    }
 
+    /// Read the exit code, upload stdout/stderr, walk the outputs
+    /// sub-directory, and return a populated [`ActionResult`].
+    ///
+    /// `out_dir` is the absolute path of the derivation's "out" output
+    /// (e.g. `/nix/store/xxx-reapi-action`), which is expected to
+    /// contain `exitcode`, `stdout`, `stderr` files and an `outputs/`
+    /// sub-directory.
+    async fn collect_action_result(
+        &self,
+        out_dir: &Path,
+    ) -> Result<nativelink_util::action_messages::ActionResult, Error> {
         // Read the exit code produced by the script.
         let exit_code: i32 = tokio::fs::read_to_string(out_dir.join("exitcode"))
             .await
@@ -232,24 +256,13 @@ impl NixWorker {
             "Output files collected"
         );
 
-        self.try_update(UpdateOperationType::UpdateWithActionStage(
-            ActionStage::Completed(nativelink_util::action_messages::ActionResult {
-                output_files,
-                exit_code,
-                stdout_digest,
-                stderr_digest,
-                output_folders: vec![],
-                output_directory_symlinks: vec![],
-                output_file_symlinks: vec![],
-                execution_metadata: Default::default(),
-                server_logs: HashMap::new(),
-                error: None,
-                message: String::new(),
-            }),
-        ))
-        .await?;
-
-        Ok(())
+        Ok(nativelink_util::action_messages::ActionResult {
+            output_files,
+            exit_code,
+            stdout_digest,
+            stderr_digest,
+            ..Default::default()
+        })
     }
 
     // ----- derivation helpers -----
