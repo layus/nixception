@@ -40,7 +40,7 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::awaited_action_db::AwaitedActionDb;
-use crate::nix_worker::{ActionUpdater, execute_action};
+use crate::nix_worker::{NixWorker, try_update_action};
 use crate::platform_property_manager::PlatformPropertyManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
@@ -304,14 +304,14 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         let (tx, rx) = watch::channel(queued_state);
 
         // Spawn the action execution as a background task.
-        // All state transitions are handled inside `execute_action` via
-        // the `ActionUpdater`.
-        let updater = ActionUpdater::new(self.active_actions.clone(), client_operation_id.clone());
-        let join_handle = tokio::spawn(execute_action(
+        // All state transitions are handled inside `NixWorker::run()`.
+        let worker = NixWorker::new(
+            self.active_actions.clone(),
+            client_operation_id.clone(),
             self.cas_store.clone(),
-            updater,
             action_info.clone(),
-        ));
+        );
+        let join_handle = tokio::spawn(worker.run());
 
         // Insert the action into the active map.  We hold no lock across
         // the spawn — `tokio::spawn` returns immediately, and the spawned
@@ -452,9 +452,7 @@ impl<I: InstantWrapper, NowFn: Fn() -> I + Clone + Send + Unpin + Sync + 'static
         operation_id: &OperationId,
         update: UpdateOperationType,
     ) -> Result<(), Error> {
-        ActionUpdater::new(self.active_actions.clone(), operation_id.clone())
-            .try_update(update)
-            .await
+        try_update_action(&self.active_actions, operation_id, update).await
     }
 
     async fn worker_keep_alive_received(
