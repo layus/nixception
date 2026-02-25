@@ -43,8 +43,11 @@ use nix_remote::ValidPathInfoWithPath;
 use nix_remote::worker_op::Resp;
 use nix_remote::worker_op::StreamingRecv;
 use nix_remote::worker_op::WorkerOp;
-use nix_remote::worker_op::{AddToStore, Plain, QueryPathInfoResponse, WithFramedSource};
-use nix_remote::{nix_client::NixDaemonClient, stderr::Msg};
+use nix_remote::worker_op::{
+    AddToStore, BuildMode, BuildPaths, BuildResult, BuildStatus, Plain, QueryPathInfoResponse,
+    WithFramedSource,
+};
+use nix_remote::{DerivedPath, nix_client::NixDaemonClient, stderr::Msg};
 
 use tokio::io::AsyncReadExt;
 
@@ -180,6 +183,104 @@ impl NixStore {
             .map_err(|e| make_err!(Code::Internal, "{}", e))?;
 
         Ok(reply)
+    }
+
+    /// Builds a derivation by sending a `BuildPathsWithResults` operation to
+    /// the nix daemon and waiting for completion.
+    ///
+    /// `drv_path` is the absolute store path of the `.drv` file
+    /// (e.g. `/nix/store/...-reapi-action.drv`).
+    ///
+    /// Returns the list of `(DerivedPath, BuildResult)` pairs on success.
+    /// Returns an error if the daemon reports a build failure or a
+    /// communication error.
+    pub fn build_derivation(
+        &self,
+        drv_path: &str,
+    ) -> Result<Vec<(DerivedPath, BuildResult)>, Error> {
+        let mut client = self.connect()?;
+
+        // Format the derivation path as a DerivedPath requesting all outputs.
+        let derived_path = format!("{}!*", drv_path);
+
+        let build_paths = BuildPaths {
+            paths: vec![nix_remote::StorePath(derived_path.into())],
+            build_mode: BuildMode::Normal,
+        };
+
+        let response_type: Resp<Vec<(DerivedPath, BuildResult)>> = Default::default();
+        let build_op = &WorkerOp::BuildPathsWithResults(Plain(build_paths), response_type.clone());
+
+        client.send_worker_op_to_daemon(build_op).map_err(|e| {
+            make_err!(
+                Code::Internal,
+                "Sending BuildPathsWithResults op to daemon: {}",
+                e
+            )
+        })?;
+
+        debug_assert!(!build_op.requires_streaming());
+
+        // Read stderr messages from the daemon (build logs, activity
+        // updates, etc.) until we receive the final `Last(())` sentinel.
+        loop {
+            let msg = client.read_error_msg().map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Reading stderr msg from daemon during build: {}",
+                    e
+                )
+            })?;
+            match msg {
+                Msg::Last(()) => break,
+                Msg::Error(err) => {
+                    return Err(make_err!(
+                        Code::Internal,
+                        "Nix daemon reported error during build: {}",
+                        String::from_utf8_lossy(&err.message)
+                    ));
+                }
+                // Log other messages (build output, activity, etc.) but
+                // continue waiting for the final response.
+                _ => {
+                    tracing::debug!(stderr_msg = ?msg, "Nix daemon stderr during build");
+                }
+            }
+        }
+
+        // Read the final response.
+        let results: Vec<(DerivedPath, BuildResult)> = client
+            .read_build_response_from_daemon(&response_type)
+            .map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Reading BuildPathsWithResults response: {}",
+                    e
+                )
+            })?;
+
+        // Check each result for failure.
+        for (path, result) in &results {
+            match result.status {
+                BuildStatus::Built
+                | BuildStatus::Substituted
+                | BuildStatus::AlreadyValid
+                | BuildStatus::ResolvesToAlreadyValid => {
+                    // Success cases — continue.
+                }
+                _ => {
+                    return Err(make_err!(
+                        Code::Internal,
+                        "Build of {:?} failed with status {:?}: {}",
+                        String::from_utf8_lossy(path.as_ref()),
+                        result.status,
+                        String::from_utf8_lossy(&result.error_msg.0)
+                    ));
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     pub async fn add_to_store(

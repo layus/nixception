@@ -172,11 +172,23 @@ impl NixWorker {
         ))
         .await;
 
-        // Phase 2 — TODO: build the derivation / wait for the build to
-        // finish and collect outputs.  This is not yet implemented; for now
-        // we immediately mark the action as completed.
+        // Phase 2 — build the derivation and wait for results.
+        let drv_abs_path = drv_path.to_absolute_path();
+        let nix_store = self
+            .cas_store
+            .downcast_ref::<NixStore>(None)
+            .ok_or_else(|| make_err!(Code::Internal, "CAS store is not a NixStore"))?;
 
-        // TODO: let out_path = self.build_derivation(drv_path).await?;
+        let build_results = nix_store
+            .build_derivation(&drv_abs_path)
+            .err_tip(|| format!("Building derivation {}", drv_abs_path))?;
+
+        event!(
+            Level::INFO,
+            drv_path = ?drv_abs_path,
+            results = ?build_results,
+            "Build completed"
+        );
 
         self.try_update(UpdateOperationType::UpdateWithActionStage(
             ActionStage::Completed(nativelink_util::action_messages::ActionResult {
