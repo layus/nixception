@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter::once;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -261,6 +261,7 @@ impl NixWorker {
             exit_code,
             stdout_digest,
             stderr_digest,
+            message: out_dir.to_string_lossy().to_string(),
             ..Default::default()
         })
     }
