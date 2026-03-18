@@ -424,6 +424,10 @@
               inherit nixception buildbox wait4x;
               inherit (pkgs) gcc coreutils;
             };
+            recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
+              inherit nixception buildbox wait4x;
+              inherit (pkgs) gcc coreutils;
+            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;

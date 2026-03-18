@@ -59,12 +59,22 @@ pub struct NixStore {
 
 impl NixStore {
     pub async fn new(spec: &NixSpec) -> Result<Arc<Self>, Error> {
-        Ok(Arc::new(Self {
-            socket_path: spec
-                .socket_path
-                .clone()
-                .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string()),
-        }))
+        let socket_path = spec
+            .socket_path
+            .clone()
+            .or_else(|| Self::socket_path_from_env())
+            .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string());
+        Ok(Arc::new(Self { socket_path }))
+    }
+
+    /// Try to derive the daemon socket path from the `NIX_REMOTE`
+    /// environment variable.  Recognises the `unix://` scheme that
+    /// the recursive-nix sandbox sets (e.g.
+    /// `unix:///build/.nix-socket`).
+    fn socket_path_from_env() -> Option<String> {
+        std::env::var("NIX_REMOTE")
+            .ok()
+            .and_then(|val| val.strip_prefix("unix://").map(|path| path.to_string()))
     }
 
     /// Connects to the nix daemon and creates a new client.
