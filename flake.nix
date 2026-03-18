@@ -169,6 +169,15 @@
             }
           );
 
+        nixceptionFor = p:
+          (craneLibFor p).buildPackage (
+            (commonArgsFor p)
+            // {
+              cargoArtifacts = cargoArtifactsFor p;
+              cargoExtraArgs = "--bin nixception";
+            }
+          );
+
         nativeTargetPkgs =
           if pkgs.system == "x86_64-linux"
           then pkgs.pkgsCross.musl64
@@ -177,6 +186,7 @@
           else pkgs;
 
         nativelink = nativelinkFor nativeTargetPkgs;
+        nixception = nixceptionFor nativeTargetPkgs;
 
         # These two can be built by all build platforms. This is not true for
         # darwin targets which are only buildable via native compilation.
@@ -353,6 +363,7 @@
           rec {
             inherit
               nativelink
+              nixception
               nativelinkCoverageForHost
               nativelink-aarch64-linux
               nativelink-image
@@ -410,7 +421,7 @@
                 inherit nativelink buck2;
               };
             recc-with-nativelink-test = pkgs.callPackage integration_tests/recc/recc-with-nativelink-test.nix {
-              inherit nativelink buildbox wait4x;
+              inherit nixception buildbox wait4x;
               inherit (pkgs) gcc coreutils;
             };
 

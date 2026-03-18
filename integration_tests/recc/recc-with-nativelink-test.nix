@@ -1,5 +1,5 @@
 {
-  nativelink,
+  nixception,
   buildbox,
   gcc,
   wait4x,
@@ -18,7 +18,7 @@ writeShellScriptBin "recc-with-nativelink-test" ''
   # Remove any stale output from a previous run.
   ${coreutils}/bin/rm -f integration_tests/recc/test/main.o
 
-  RUST_BACKTRACE=1 ${nativelink}/bin/nativelink -- nix-proxy-config.json 2>&1 | tee -i integration_tests/recc/nativelink.log &
+  RUST_BACKTRACE=1 ${nixception}/bin/nixception 2>&1 | tee -i integration_tests/recc/nativelink.log &
 
   ${wait4x}/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s
 
