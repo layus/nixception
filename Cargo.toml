@@ -25,6 +25,9 @@ strip = true
 [[bin]]
 name = "nativelink"
 
+[[bin]]
+name = "nixception"
+
 [features]
 nix = ["nativelink-worker/nix"]
 
@@ -55,6 +58,7 @@ mimalloc = "0.1.44"
 rustls-pemfile = { version = "2.2.0", features = [
   "std",
 ], default-features = false }
+serde_json5 = { version = "0.2.1", default-features = false }
 tokio = { version = "1.44.1", features = [
   "fs",
   "io-util",
