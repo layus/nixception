@@ -1,5 +1,8 @@
 [workspace]
-exclude = ["tools/generate-bazel-rc"]
+exclude = [
+  "tools/generate-bazel-rc",
+  "vendor",
+]
 resolver = "2"
 
 [package]
@@ -69,6 +72,10 @@ tower = { version = "0.5.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 #jsonwebtoken = { version = "10.2.0", features = ["aws_lc_rs"] }
 # gcloud-auth = { version = "1.2.0", features = ["jwt-aws-lc-rs"] }
+
+[workspace.dependencies]
+nix-compat = { path = "vendor/tvix/tvix/nix-compat" }
+nix-remote = { path = "vendor/nix-remote-rust/nix-remote" }
 
 [workspace.cargo-features-manager.keep]
 async-lock = ["std"]

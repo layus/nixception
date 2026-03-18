@@ -64,8 +64,7 @@
               # Getting started
 
               Enter the Nix environment with `nix develop`.
-              Get your credentials for the NativeLink cloud on
-              https://app.nativelink.com/ and paste them into `user.bazelrc`.
+              Get your credentials for NativeLink and paste them into `user.bazelrc`.
               Run `bazel build hello-world` to build the example with local
               remote execution.
 
@@ -109,7 +108,8 @@
                   "aarch64-linux" = "aarch64-unknown-linux-musl";
                   "x86_64-darwin" = "x86_64-apple-darwin";
                   "aarch64-darwin" = "aarch64-apple-darwin";
-                }.${
+                }
+                  .${
                   nixSystem
                 } or (throw "Unsupported Nix host platform: ${nixSystem}")
             )
@@ -121,7 +121,9 @@
             then "${pkgs.mold}/bin/ld.mold"
             else "${pkgs.llvmPackages_20.lld}/bin/ld.lld";
 
-          linkerEnvVar = "CARGO_TARGET_${pkgs.lib.toUpper (pkgs.lib.replaceStrings ["-"] ["_"] targetArch)}_LINKER";
+          linkerEnvVar = "CARGO_TARGET_${
+            pkgs.lib.toUpper (pkgs.lib.replaceStrings ["-"] ["_"] targetArch)
+          }_LINKER";
         in
           {
             inherit src;
@@ -131,7 +133,9 @@
               else q.stdenv;
             strictDeps = true;
             buildInputs =
-              [p.cacert]
+              [
+                p.cacert
+              ]
               ++ pkgs.lib.optionals p.stdenv.targetPlatform.isDarwin [
                 p.darwin.apple_sdk.frameworks.Security
                 p.libiconv
@@ -158,12 +162,12 @@
         nightlyCargoArtifactsFor = p: (craneLibFor p).buildDepsOnly (commonArgsFor p);
 
         nativelinkFor = p:
-          (craneLibFor p).buildPackage ((commonArgsFor p)
+          (craneLibFor p).buildPackage (
+            (commonArgsFor p)
             // {
               cargoArtifacts = cargoArtifactsFor p;
-              # Enable this for debugging worker scheduler issues
-              # cargoExtraArgs = "--features worker_find_logging";
-            });
+            }
+          );
 
         nativeTargetPkgs =
           if pkgs.system == "x86_64-linux"
@@ -179,14 +183,13 @@
         nativelink-aarch64-linux = nativelinkFor pkgs.pkgsCross.aarch64-multiplatform-musl;
         nativelink-x86_64-linux = nativelinkFor pkgs.pkgsCross.musl64;
 
-        nativelink-is-executable-test = pkgs.callPackage ./tools/nativelink-is-executable-test.nix {inherit nativelink;};
+        nativelink-is-executable-test = pkgs.callPackage ./tools/nativelink-is-executable-test.nix {
+          inherit nativelink;
+        };
 
         generate-toolchains = pkgs.callPackage ./tools/generate-toolchains.nix {};
 
-        build-chromium-tests =
-          pkgs.writeShellScriptBin
-          "build-chromium-tests"
-          ./deploy/chromium-example/build_chromium_tests.sh;
+        build-chromium-tests = pkgs.writeShellScriptBin "build-chromium-tests" ./deploy/chromium-example/build_chromium_tests.sh;
 
         docs = pkgs.callPackage ./tools/docs.nix {rust = pkgs.lre.stable-rust;};
 
@@ -216,7 +219,7 @@
               Labels = {
                 "org.opencontainers.image.description" = "An RBE compatible, high-performance cache and remote executor.";
                 "org.opencontainers.image.documentation" = "https://github.com/TraceMachina/nativelink";
-                "org.opencontainers.image.licenses" = "Apache-2.0";
+                "org.opencontainers.image.licenses" = "FSL-1.1-Apache-2.0";
                 "org.opencontainers.image.revision" = "${self.rev or self.dirtyRev or "dirty"}";
                 "org.opencontainers.image.source" = "https://github.com/TraceMachina/nativelink";
                 "org.opencontainers.image.title" = "NativeLink";
@@ -225,7 +228,9 @@
             };
           };
 
-        nativelink-worker-init = pkgs.callPackage ./tools/nativelink-worker-init.nix {inherit buildImage self nativelink-image;};
+        nativelink-worker-init = pkgs.callPackage ./tools/nativelink-worker-init.nix {
+          inherit buildImage self nativelink-image;
+        };
 
         createWorker = pkgs.nativelink-tools.lib.createWorker self;
 
@@ -304,7 +309,8 @@
               hardeningDisable = ["fortify"];
             };
         in
-          (nightlyCraneLibFor p).cargoLlvmCov (coverageArgs
+          (nightlyCraneLibFor p).cargoLlvmCov (
+            coverageArgs
             // {
               cargoArtifacts = nightlyCargoArtifactsFor p;
               cargoExtraArgs = builtins.concatStringsSep " " [
@@ -315,7 +321,8 @@
                 "--ignore-filename-regex '.*(genproto|vendor-cargo-deps|crates).*'"
               ];
               cargoLlvmCovExtraArgs = "--html --output-dir $out";
-            });
+            }
+          );
 
         nativelinkCoverageForHost = nativelinkCoverageFor pkgs;
       in rec {
@@ -369,14 +376,49 @@
             nativelink-worker-toolchain-buck2 = createWorker toolchain-buck2;
             nativelink-worker-buck2-toolchain = buck2-toolchain;
             image = nativelink-image;
-            generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {craneLib = craneLibFor pkgs;};
 
-            inherit (pkgs) buildstream buildbox mongodb wait4x bazelisk;
-            buildstream-with-nativelink-test = pkgs.callPackage integration_tests/buildstream/buildstream-with-nativelink-test.nix {
-              inherit nativelink buildstream buildbox;
+            inherit
+              (pkgs)
+              buildstream
+              buildbox
+              buck2
+              mongodb
+              wait4x
+              bazelisk
+              ;
+            buildstream-with-nativelink-test =
+              pkgs.callPackage integration_tests/buildstream/buildstream-with-nativelink-test.nix
+              {
+                inherit nativelink buildstream buildbox;
+              };
+            mongo-with-nativelink-test =
+              pkgs.callPackage integration_tests/mongo/mongo-with-nativelink-test.nix
+              {
+                inherit
+                  nativelink
+                  mongodb
+                  wait4x
+                  bazelisk
+                  ;
+              };
+            rbe-toolchain-with-nativelink-test = pkgs.callPackage toolchain-examples/rbe-toolchain-test.nix {
+              inherit nativelink bazelisk;
             };
-            mongo-with-nativelink-test = pkgs.callPackage integration_tests/mongo/mongo-with-nativelink-test.nix {
-              inherit nativelink mongodb wait4x bazelisk;
+            buck2-with-nativelink-test =
+              pkgs.callPackage integration_tests/buck2/buck2-with-nativelink-test.nix
+              {
+                inherit nativelink buck2;
+              };
+            recc-with-nativelink-test = pkgs.callPackage integration_tests/recc/recc-with-nativelink-test.nix {
+              inherit nativelink buildbox wait4x;
+              inherit (pkgs) gcc coreutils;
+            };
+
+            generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
+              craneLib = craneLibFor pkgs;
+            };
+            generate-stores-config = pkgs.callPackage nativelink-config/generate-stores-config/build.nix {
+              craneLib = craneLibFor pkgs;
             };
           }
           // (
@@ -406,7 +448,7 @@
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {
             inherit pkgs;
-            inherit (packages) generate-bazel-rc;
+            inherit (packages) generate-bazel-rc generate-stores-config;
             nightly-rust = pkgs.rust-bin.nightly.${pkgs.lre.nightly-rust.meta.version};
           };
         };
@@ -458,6 +500,8 @@
               # Development tooling
               pkgs.git
               pkgs.pre-commit
+              pkgs.git-cliff
+              pkgs.buck2
 
               # Rust
               bazel
@@ -505,7 +549,7 @@
               pkgs.nativelink-tools.native-cli
               pkgs.nativelink-tools.create-local-image
 
-              # Tools fo nix backend
+              # Tools for nix backend
               pkgs.protobuf
               pkgs.protoc-gen-rust
             ]

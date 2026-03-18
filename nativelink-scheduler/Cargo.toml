@@ -15,7 +15,7 @@ nativelink-metric = { path = "../nativelink-metric" }
 nativelink-proto = { path = "../nativelink-proto" }
 nativelink-store = { path = "../nativelink-store" }
 nativelink-util = { path = "../nativelink-util" }
-nix-compat = { path = "../../tvix/tvix/nix-compat" }
+nix-compat = { workspace = true }
 # nix-remote = { path = "../../nix-remote-rust/nix-remote" }
 
 # TODO(palfrey): This should not be a dependency. Move the corresponding

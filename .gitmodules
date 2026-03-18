@@ -1,0 +1,8 @@
+[submodule "vendor/nix-remote-rust"]
+	path = vendor/nix-remote-rust
+	url = git@github.com:layus/nix-remote-rust.git
+	branch = nativelink-compat
+[submodule "vendor/tvix"]
+	path = vendor/tvix
+	url = git@github.com:layus/tvix.git
+	branch = nativelink-compat

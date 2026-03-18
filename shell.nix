@@ -7,6 +7,10 @@ pkgs.callPackage (
     rustPlatform,
     pkg-config,
     openssl,
+    nixd,
+    vscode-json-languageserver,
+    package-version-server,
+    clang-tools,
   }:
     mkShell {
       strictDeps = true;
@@ -16,6 +20,10 @@ pkgs.callPackage (
         rustPlatform.bindgenHook
         # optional: add pkg-config support
         pkg-config
+        nixd
+        vscode-json-languageserver
+        package-version-server
+        clang-tools
       ];
       buildInputs = [
         # add desired native packages
