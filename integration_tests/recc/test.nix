@@ -43,9 +43,7 @@
   '';
 
   # Build the canonical runner from tools/runner.nix, passing gppSleeper as
-  # part of runtimeInputs so the runner's PATH includes the sleeping g++.
-  # coreutils, util-linux and bashNonInteractive are included by default;
-  # gppSleeper is appended so its g++ shadows any earlier entry on PATH.
+  # part of extraRuntimeInputs so the runner's PATH includes the sleeping g++.
   runner = callPackage ../../tools/runner.nix {
     extraRuntimeInputs = [gppSleeper];
   };
