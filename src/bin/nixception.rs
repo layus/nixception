@@ -53,6 +53,20 @@ use tracing::{info, warn};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+const VOID: &str = "VOID";
+const NIX_STORE: &str = "NIX_STORE";
+const NIX_SCHEDULER: &str = "NIX_SCHEDULER";
+const INSTANCE: &str = "main";
+
+/// Wrap a config value in a single-element `WithInstanceName` vec using
+/// the default instance name.
+fn with_instance<T>(config: T) -> Vec<WithInstanceName<T>> {
+    vec![WithInstanceName {
+        instance_name: INSTANCE.to_string(),
+        config,
+    }]
+}
+
 async fn inner_main(
     shutdown_tx: broadcast::Sender<ShutdownGuard>,
     scheduler_shutdown_tx: oneshot::Sender<()>,
@@ -60,14 +74,12 @@ async fn inner_main(
     // ── Stores ──────────────────────────────────────────────────────────
     let store_manager = Arc::new(StoreManager::new());
 
-    // VOID – noop store used as the AC backend (actions are never cached)
-    store_manager.add_store("VOID", Store::new(NoopStore::new()));
+    store_manager.add_store(VOID, Store::new(NoopStore::new()));
 
-    // NIX_STORE – bridges CAS operations to the local Nix daemon
     let nix_store = NixStore::new(&NixSpec { socket_path: None })
         .await
         .err_tip(|| "Failed to create NIX_STORE")?;
-    store_manager.add_store("NIX_STORE", Store::new(nix_store));
+    store_manager.add_store(NIX_STORE, Store::new(nix_store));
 
     // ── Runner info ────────────────────────────────────────────────────
     let runner_info = Arc::new(
@@ -76,8 +88,8 @@ async fn inner_main(
 
     // ── Scheduler ──────────────────────────────────────────────────────
     let nix_proxy_spec = NixProxySpec {
-        ac_store: "VOID".to_string(),
-        cas_store: "NIX_STORE".to_string(),
+        ac_store: VOID.to_string(),
+        cas_store: NIX_STORE.to_string(),
     };
 
     let task_change_notify = Arc::new(Notify::new());
@@ -85,10 +97,10 @@ async fn inner_main(
         memory_awaited_action_db_factory(0, &task_change_notify, SystemTime::now);
 
     let ac_store = store_manager
-        .get_store("VOID")
+        .get_store(VOID)
         .err_tip(|| "'VOID' store not found")?;
     let cas_store = store_manager
-        .get_store("NIX_STORE")
+        .get_store(NIX_STORE)
         .err_tip(|| "'NIX_STORE' store not found")?;
 
     let (action_scheduler, _worker_scheduler) = NixScheduler::new(
@@ -101,52 +113,32 @@ async fn inner_main(
         runner_info,
     );
 
-    let mut action_schedulers = HashMap::new();
     let action_scheduler: Arc<dyn nativelink_util::operation_state_manager::ClientStateManager> =
         action_scheduler;
-    action_schedulers.insert("NIX_SCHEDULER".to_string(), action_scheduler);
+    let action_schedulers = HashMap::from([(NIX_SCHEDULER.to_string(), action_scheduler)]);
 
     // ── Services ───────────────────────────────────────────────────────
-    let cas_cfg = vec![WithInstanceName {
-        instance_name: "main".to_string(),
-        config: CasStoreConfig {
-            cas_store: "NIX_STORE".to_string(),
-        },
-    }];
-
-    let ac_cfg = vec![WithInstanceName {
-        instance_name: "main".to_string(),
-        config: AcStoreConfig {
-            ac_store: "VOID".to_string(),
-            read_only: false,
-        },
-    }];
-
-    let exec_cfg = vec![WithInstanceName {
-        instance_name: "main".to_string(),
-        config: ExecutionConfig {
-            cas_store: "NIX_STORE".to_string(),
-            scheduler: "NIX_SCHEDULER".to_string(),
-        },
-    }];
-
-    let caps_cfg = vec![WithInstanceName {
-        instance_name: "main".to_string(),
-        config: CapabilitiesConfig {
-            remote_execution: Some(CapabilitiesRemoteExecutionConfig {
-                scheduler: "NIX_SCHEDULER".to_string(),
-            }),
-        },
-    }];
-
-    let bs_cfg = vec![WithInstanceName {
-        instance_name: "main".to_string(),
-        config: ByteStreamConfig {
-            cas_store: "NIX_STORE".to_string(),
-            max_bytes_per_stream: 0,
-            persist_stream_on_disconnect_timeout: 0,
-        },
-    }];
+    let cas_cfg = with_instance(CasStoreConfig {
+        cas_store: NIX_STORE.to_string(),
+    });
+    let ac_cfg = with_instance(AcStoreConfig {
+        ac_store: VOID.to_string(),
+        read_only: false,
+    });
+    let exec_cfg = with_instance(ExecutionConfig {
+        cas_store: NIX_STORE.to_string(),
+        scheduler: NIX_SCHEDULER.to_string(),
+    });
+    let caps_cfg = with_instance(CapabilitiesConfig {
+        remote_execution: Some(CapabilitiesRemoteExecutionConfig {
+            scheduler: NIX_SCHEDULER.to_string(),
+        }),
+    });
+    let bs_cfg = with_instance(ByteStreamConfig {
+        cas_store: NIX_STORE.to_string(),
+        max_bytes_per_stream: 0,
+        persist_stream_on_disconnect_timeout: 0,
+    });
 
     let cas_server = CasServer::new(&cas_cfg, &store_manager)
         .err_tip(|| "Could not create CAS service")?
