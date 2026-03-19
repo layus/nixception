@@ -26,7 +26,6 @@
   stdenv,
   callPackage,
   writeShellScriptBin,
-  bashNonInteractive,
 }: let
   # A wrapper whose bin/g++ sleeps for 10 s before calling the real compiler,
   # making non-cached remote runs noticeably slower than cached ones.
@@ -45,10 +44,9 @@
 
   # Build the canonical runner from tools/runner.nix, passing gppSleeper as
   # part of runtimeInputs so the runner's PATH includes the sleeping g++.
-  # coreutils, util-linux and bashNonInteractive provide the default tooling;
-  # gppSleeper is listed last so its g++ shadows any earlier entry.
+  # coreutils, util-linux and bashNonInteractive are included by default;
+  # gppSleeper is appended so its g++ shadows any earlier entry on PATH.
   runner = callPackage ../../tools/runner.nix {
-    bash = bashNonInteractive;
     extraRuntimeInputs = [gppSleeper];
   };
 
