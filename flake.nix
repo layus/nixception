@@ -259,7 +259,7 @@
         createWorker = pkgs.nativelink-tools.lib.createWorker self;
 
         buck2-toolchain = let
-          buck2-nightly-rust-version = "2024-04-28";
+          buck2-nightly-rust-version = "2025-04-08";
           buck2-nightly-rust = pkgs.rust-bin.nightly.${buck2-nightly-rust-version};
           buck2-rust = buck2-nightly-rust.default.override {extensions = ["rust-src"];};
         in
@@ -467,14 +467,9 @@
             else {}
           );
         checks = {
-          # TODO(palfrey): Fix the tests.
-          # tests = craneLib.cargoNextest (commonArgs
-          #   // {
-          #   inherit cargoArtifacts;
-          #   cargoNextestExtraArgs = "--all";
-          #   partitions = 1;
-          #   partitionType = "count";
-          # });
+          # Include the recc recursive-nix integration test so that
+          # `nix flake check` will build and run it.
+          inherit (packages) recc-recursive-nix-test;
         };
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {

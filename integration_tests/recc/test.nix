@@ -65,37 +65,38 @@ stdenv.mkDerivation {
     # Wait until nixception is accepting TCP connections.
     wait4x tcp 127.0.0.1:50051 --timeout 30s
 
-    echo "nixception is ready – running recc"
+    echo "nixception is ready – running make (using recc as driver)"
 
-    # Ask recc to compile the test file remotely via nixception.
-    ${coreutils}/bin/rm -f main.o
+    # Clean any previous artifacts from earlier runs
+    ${coreutils}/bin/rm -f demo_app *.o make.log
 
+    # Run the project's generic Makefile under test/ while pointing CC/CXX to recc.
+    # Use CPPFLAGS to inject the compile-time define so the Makefile doesn't need changes.
     env \
       RECC_VERBOSE=1 \
       RECC_LOG_PROGRESS=1 \
       RECC_INSTANCE=main \
       RECC_SERVER=127.0.0.1:50051 \
-      ${buildbox}/bin/recc \
-        ${gcc}/bin/g++ -DBUILD_CONSTANT=42 -c main.cpp -o main.o \
-      2>&1 | tee recc.log
+      CC="${buildbox}/bin/recc ${gcc}/bin/gcc" \
+      CXX="${buildbox}/bin/recc ${gcc}/bin/g++" \
+      CPPFLAGS=-DBUILD_CONSTANT=42 \
+      make test 2>&1 | tee make.log
 
     # ── verify ────────────────────────────────────────────────────────
-    if [ ! -f main.o ]; then
-      echo "FAIL: main.o was not created"
+    if [ ! -f demo_app ]; then
+      echo "FAIL: demo_app was not created by make"
       echo "--- nixception log ---"
       cat nixception.log
-      echo "--- recc log ---"
-      cat recc.log
+      echo "--- make log ---"
+      cat make.log
       echo "---"
       kill "$NIXCEPTION_PID" 2>/dev/null || true
       exit 1
     fi
 
-    echo "SUCCESS: main.o was created by recc via nixception"
+    echo "SUCCESS: demo_app was created by recc via nixception and Makefile"
 
     # Check the nixception log for obvious errors.
-    # Match tracing's " ERROR " level indicator (surrounded by spaces)
-    # but not struct fields like "error_msg" in debug output.
     if grep -q ' ERROR ' nixception.log; then
       echo "FAIL: nixception log contains errors"
       cat nixception.log
@@ -116,9 +117,10 @@ stdenv.mkDerivation {
     runHook preInstall
 
     mkdir -p $out
-    cp main.o          $out/
-    cp nixception.log  $out/
-    cp recc.log        $out/
+    # Install the built program and collected logs so test consumers can inspect them.
+    cp demo_app          $out/
+    cp nixception.log    $out/
+    cp make.log          $out/ || true
     echo "Test passed" > $out/result.txt
 
     runHook postInstall
