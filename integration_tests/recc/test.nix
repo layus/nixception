@@ -13,7 +13,7 @@
 #
 #   recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
 #     inherit nixception buildbox wait4x;
-#     inherit (pkgs) gcc coreutils moreutils;
+#     inherit (pkgs) gcc moreutils;
 #   };
 #
 {
@@ -21,7 +21,6 @@
   buildbox,
   wait4x,
   gcc,
-  coreutils,
   moreutils,
   stdenv,
   callPackage,
@@ -76,62 +75,53 @@ in
     # The only source we need is the tiny C++ test files.
     src = ./test;
 
-    nativeBuildInputs = [
-      nixceptionHook
-      reccGpp
-      buildbox
-      gcc
-      coreutils
-      moreutils
-      gppSleeper
+    # nixceptionHook is the only explicit native dependency.  Everything else
+    # (compiler, recc, wait4x, ts …) is referenced by absolute Nix store path
+    # inside the hook and the wrapper scripts, so no PATH entry is required.
+    nativeBuildInputs = [nixceptionHook];
+
+    # ── parallel builds ─────────────────────────────────────────────────
+    # Lets stdenv pass -j${NIX_BUILD_CORES} to make automatically.
+    enableParallelBuilding = true;
+
+    # ── make variable assignments ────────────────────────────────────────
+    # Equivalent to cmakeFlags for cmake-based builds.  Passed as arguments
+    # to every make invocation (build, check, install).
+    makeFlags = [
+      "CC=${reccGpp}/bin/recc-gpp"
+      "CXX=${reccGpp}/bin/recc-gpp"
+      "CPPFLAGS=-DBUILD_CONSTANT=42"
     ];
 
-    # ── build ───────────────────────────────────────────────────────────
-    # nixceptionHook has already started the server via nixceptionStartPhase
-    # (registered in preBuildPhases) and will stop it via nixceptionStopPhase
-    # (registered in postPhases).  This phase only needs to drive make.
-    buildPhase = ''
-      runHook preBuild
+    # ── recc environment ────────────────────────────────────────────────
+    # These become environment variables in the build sandbox.  recc reads
+    # them to locate the remote execution, CAS, and action-cache endpoints.
+    # All three must point at nixception; without the explicit CAS / action-
+    # cache overrides recc defaults to localhost:8085.
+    RECC_LOG_PROGRESS = "1";
+    RECC_INSTANCE = "main";
+    RECC_SERVER = "127.0.0.1:50051";
+    RECC_CAS_SERVER = "127.0.0.1:50051";
+    RECC_ACTION_CACHE_SERVER = "127.0.0.1:50051";
 
-      BUILD_START=$SECONDS
-
-      echo "nixception is ready – running make (using recc as driver)"
-
-      # Clean any previous artifacts from earlier runs.
-      ${coreutils}/bin/rm -f demo_app *.o
-
-      # Run the project's generic Makefile while pointing CC/CXX to the wrapper.
-      # All three recc endpoints are pointed at nixception so recc doesn't fall
-      # back to its built-in default of localhost:8085 for the CAS / action cache.
-      env \
-        RECC_VERBOSE=1 \
-        RECC_LOG_PROGRESS=1 \
-        RECC_INSTANCE=main \
-        RECC_SERVER=127.0.0.1:50051 \
-        RECC_CAS_SERVER=127.0.0.1:50051 \
-        RECC_ACTION_CACHE_SERVER=127.0.0.1:50051 \
-        CC="${reccGpp}/bin/recc-gpp" \
-        CXX="${reccGpp}/bin/recc-gpp" \
-        CPPFLAGS=-DBUILD_CONSTANT=42 \
-        make -j4 test > >(${moreutils}/bin/ts '[make] %H:%M:%.S' >&2) 2>&1
-
-      # ── verify ────────────────────────────────────────────────────────
-      if [ ! -f demo_app ]; then
-        echo "FAIL: demo_app was not created by make" >&2
-        exit 1
-      fi
-
-      echo "SUCCESS: demo_app was created by recc via nixception and Makefile"
-
+    # ── build timing ─────────────────────────────────────────────────────
+    # preBuild and postBuild are evaluated in the same shell as buildPhase,
+    # so BUILD_START set in preBuild survives into postBuild.
+    preBuild = "BUILD_START=$SECONDS";
+    postBuild = ''
       BUILD_END=$SECONDS
       echo "buildPhase completed in $((BUILD_END - BUILD_START)) seconds"
-
-      runHook postBuild
     '';
+
+    # ── check ────────────────────────────────────────────────────────────
+    # stdenv's checkPhase will auto-discover the `test` Makefile target and
+    # run it after buildPhase.  The nixception server is still up at this
+    # point (it is stopped in postPhases, after installPhase).
+    doCheck = true;
 
     # ── install ─────────────────────────────────────────────────────────
     # Only the compiled binary goes into $out; logs are streamed to the Nix
-    # build log via ts so the output is fully deterministic.
+    # build log via ts (inside the hook) so the output is fully deterministic.
     installPhase = ''
       runHook preInstall
 

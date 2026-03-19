@@ -428,7 +428,7 @@
             recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
               inherit nixception;
               inherit buildbox wait4x;
-              inherit (pkgs) gcc coreutils moreutils;
+              inherit (pkgs) gcc moreutils;
             };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
