@@ -13,7 +13,7 @@
 #
 #   recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
 #     inherit nixception buildbox wait4x;
-#     inherit (pkgs) gcc coreutils;
+#     inherit (pkgs) gcc coreutils moreutils;
 #   };
 #
 {
@@ -42,19 +42,20 @@
     exec ${gcc}/bin/g++ "$@"
   '';
 
-  # Build the canonical runner from tools/runner.nix, passing gppSleeper as
-  # part of extraRuntimeInputs so the runner's PATH includes the sleeping g++.
+  # Build a custom runner that puts gppSleeper first on PATH so the sleeping
+  # g++ is used for remote compilations dispatched by nixception.
+  # extraRuntimeInputs are listed first in runtimeInputs, so gppSleeper's g++
+  # takes precedence over anything in the built-in defaults.
   runner = callPackage ../../tools/runner.nix {
     extraRuntimeInputs = [gppSleeper];
   };
 
-  # Wrap nixception to export NIXCEPTION_RUNNER_* so RunnerInfo::from_env()
-  # can discover the runner at startup.
-  nixceptionWrapper = writeShellScriptBin "nixception" ''
-    export NIXCEPTION_RUNNER_OUT=${runner}
-    export NIXCEPTION_RUNNER_DRV=${runner.drvPath}
-    exec ${nixception}/bin/nixception "$@"
-  '';
+  # The nixception hook starts the server (with the custom runner) before
+  # buildPhase and stops it after installPhase.  We override nixception's
+  # default runner here by passing our custom one.
+  nixceptionHook = callPackage ../../tools/nixception-hook.nix {
+    inherit nixception wait4x moreutils runner;
+  };
 
   # Wrap `recc <compiler>` in a single-word script so make doesn't choke on
   # the space in a two-word CC/CXX value.  The full store path to gppSleeper's
@@ -72,14 +73,13 @@ in
     # the local Nix store.
     requiredSystemFeatures = ["recursive-nix"];
 
-    # The only source we need is the tiny C++ test file.
+    # The only source we need is the tiny C++ test files.
     src = ./test;
 
     nativeBuildInputs = [
-      nixceptionWrapper
+      nixceptionHook
       reccGpp
       buildbox
-      wait4x
       gcc
       coreutils
       moreutils
@@ -87,35 +87,18 @@ in
     ];
 
     # ── build ───────────────────────────────────────────────────────────
+    # nixceptionHook has already started the server via nixceptionStartPhase
+    # (registered in preBuildPhases) and will stop it via nixceptionStopPhase
+    # (registered in postPhases).  This phase only needs to drive make.
     buildPhase = ''
       runHook preBuild
 
       BUILD_START=$SECONDS
 
-      # The recursive-nix sandbox automatically sets
-      #   NIX_REMOTE=unix:///build/.nix-socket
-      # nixception's NixStore backend now reads NIX_REMOTE to discover
-      # the daemon socket, so no extra setup is needed.
-
-      # Sanity-check: the socket should be reachable.
-      test -S /build/.nix-socket \
-        || { echo "FAIL: recursive-nix daemon socket not found"; exit 1; }
-
-      # Start nixception in the background, piping its output through `ts` so
-      # every log line is timestamped and prefixed with the service name.
-      # The output goes directly to the Nix build log (fd 2) rather than a file,
-      # which keeps $out deterministic.
-      echo "Starting nixception…"
-      RUST_BACKTRACE=1 nixception > >(ts '[nixception] %H:%M:%.S' >&2) 2>&1 &
-      NIXCEPTION_PID=$!
-
-      # Wait until nixception is accepting TCP connections.
-      wait4x tcp 127.0.0.1:50051 --timeout 30s
-
       echo "nixception is ready – running make (using recc as driver)"
 
-      # Clean any previous artifacts from earlier runs
-      ${coreutils}/bin/rm -f demo_app *.o make.log
+      # Clean any previous artifacts from earlier runs.
+      ${coreutils}/bin/rm -f demo_app *.o
 
       # Run the project's generic Makefile while pointing CC/CXX to the wrapper.
       # All three recc endpoints are pointed at nixception so recc doesn't fall
@@ -130,19 +113,15 @@ in
         CC="${reccGpp}/bin/recc-gpp" \
         CXX="${reccGpp}/bin/recc-gpp" \
         CPPFLAGS=-DBUILD_CONSTANT=42 \
-        make -j4 test > >(ts '[make] %H:%M:%.S' >&2) 2>&1
+        make -j4 test > >(${moreutils}/bin/ts '[make] %H:%M:%.S' >&2) 2>&1
 
       # ── verify ────────────────────────────────────────────────────────
       if [ ! -f demo_app ]; then
         echo "FAIL: demo_app was not created by make" >&2
-        kill "$NIXCEPTION_PID" 2>/dev/null || true
         exit 1
       fi
 
       echo "SUCCESS: demo_app was created by recc via nixception and Makefile"
-
-      kill "$NIXCEPTION_PID" 2>/dev/null || true
-      wait "$NIXCEPTION_PID" 2>/dev/null || true
 
       BUILD_END=$SECONDS
       echo "buildPhase completed in $((BUILD_END - BUILD_START)) seconds"
