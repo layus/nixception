@@ -12,12 +12,12 @@
 # The derivation is meant to be called from the top-level flake, e.g.:
 #
 #   recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
-#     inherit nixception buildbox;
+#     inherit nixceptionHook buildbox;
 #     inherit (pkgs) gcc;
 #   };
 #
 {
-  nixception,
+  nixceptionHook,
   buildbox,
   gcc,
   stdenv,
@@ -57,16 +57,10 @@ in
     # The only source we need is the tiny C++ test files.
     src = ./test;
 
-    # nixception carries nixception-hook as a propagatedNativeBuildInput, so
-    # the setup hook is sourced automatically – no manual start/stop needed.
-    nativeBuildInputs = [nixception];
-
-    # ── custom runner ────────────────────────────────────────────────────
-    # nixception.mkRunner builds a runner with the given extraRuntimeInputs
-    # and returns a "outPath drvPath" string that the hook reads at build time.
-    # gppSleeper is injected so remote compilations go through the sleep wrapper,
-    # making uncached runs visibly slower than cached ones.
-    nixceptionRunner = nixception.mkRunner [gppSleeper];
+    # nixceptionHook.withPackages injects gppSleeper into the runner sandbox so
+    # remote compilations go through the sleep wrapper, making uncached runs
+    # visibly slower than cached ones.
+    nativeBuildInputs = [(nixceptionHook.withPackages [gppSleeper])];
 
     # ── parallel builds ──────────────────────────────────────────────────
     # Lets stdenv pass -j${NIX_BUILD_CORES} to make automatically.
