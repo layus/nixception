@@ -132,7 +132,7 @@ in
           # two-word CC confuses some rules).
           cat > ./recc-gpp <<EOF
       #!/bin/sh
-      exec ${buildbox}/bin/recc g++ "\$@"
+      exec ${buildbox}/bin/recc ${gppSleeper}/bin/g++ "\$@"
       EOF
           chmod +x ./recc-gpp
 
