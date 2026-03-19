@@ -20,11 +20,9 @@ use std::time::SystemTime;
 use axum::http::Uri;
 use futures::future::{BoxFuture, try_join_all};
 use hyper::StatusCode;
-use hyper_util::rt::tokio::TokioIo;
 use hyper_util::server::conn::auto;
-use hyper_util::service::TowerToHyperService;
 use mimalloc::MiMalloc;
-use nativelink::run_server;
+use nativelink::{run_server, tcp_accept_loop};
 use nativelink_config::cas_server::{
     AcStoreConfig, ByteStreamConfig, CapabilitiesConfig, CapabilitiesRemoteExecutionConfig,
     CasStoreConfig, ExecutionConfig, WithInstanceName,
@@ -43,16 +41,14 @@ use nativelink_service::execution_server::ExecutionServer;
 use nativelink_store::nix_store::NixStore;
 use nativelink_store::noop_store::NoopStore;
 use nativelink_store::store_manager::StoreManager;
-use nativelink_util::background_spawn;
 use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::{DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG, Store};
 use nativelink_util::task::TaskExecutor;
 use tokio::net::TcpListener;
-use tokio::select;
 use tokio::sync::{Notify, broadcast, oneshot};
 use tonic::service::Routes;
-use tracing::{error, error_span, info, warn};
+use tracing::{info, warn};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -196,53 +192,7 @@ async fn inner_main(
 
     let mut root_futures: Vec<BoxFuture<Result<(), Error>>> = Vec::new();
 
-    root_futures.push(Box::pin(async move {
-        loop {
-            select! {
-                accept_result = tcp_listener.accept() => {
-                    match accept_result {
-                        Ok((tcp_stream, remote_addr)) => {
-                            info!(
-                                target: "nativelink::services",
-                                ?remote_addr,
-                                ?socket_addr,
-                                "Client connected"
-                            );
-
-                            let (http, svc) = (http.clone(), svc.clone());
-
-                            background_spawn!(
-                                name: "http_connection",
-                                fut: error_span!(
-                                    "http_connection",
-                                    remote_addr = %remote_addr,
-                                    socket_addr = %socket_addr,
-                                ).in_scope(|| async move {
-                                    if let Err(err) = http.serve_connection(
-                                        TokioIo::new(tcp_stream),
-                                        TowerToHyperService::new(svc),
-                                    ).await {
-                                        error!(
-                                            target: "nativelink::services",
-                                            ?err,
-                                            "Failed running service"
-                                        );
-                                    }
-                                }),
-                                target: "nativelink::services",
-                                ?remote_addr,
-                                ?socket_addr,
-                            );
-                        },
-                        Err(err) => {
-                            error!(?err, "Failed to accept tcp connection");
-                        }
-                    }
-                },
-            }
-        }
-        // Unreachable, but the type system needs it.
-    }));
+    root_futures.push(tcp_accept_loop(tcp_listener, http, svc, None, socket_addr));
 
     // Shutdown handler – no worker schedulers to tear down but we still
     // need to satisfy the protocol so the SIGTERM path works.

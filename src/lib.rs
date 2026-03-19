@@ -661,69 +661,13 @@ async fn inner_main(
             http.http2().max_header_list_size(value);
         }
         info!("Ready, listening on {socket_addr}",);
-        root_futures.push(Box::pin(async move {
-            loop {
-                select! {
-                    accept_result = tcp_listener.accept() => {
-                        match accept_result {
-                            Ok((tcp_stream, remote_addr)) => {
-                                info!(
-                                    target: "nativelink::services",
-                                    ?remote_addr,
-                                    ?socket_addr,
-                                    "Client connected"
-                                );
-
-                                let (http, svc, maybe_tls_acceptor) =
-                                    (http.clone(), svc.clone(), maybe_tls_acceptor.clone());
-
-                                background_spawn!(
-                                    name: "http_connection",
-                                    fut: error_span!(
-                                        "http_connection",
-                                        remote_addr = %remote_addr,
-                                        socket_addr = %socket_addr,
-                                    ).in_scope(|| async move {
-                                        let serve_connection = if let Some(tls_acceptor) = maybe_tls_acceptor {
-                                            match tls_acceptor.accept(tcp_stream).await {
-                                                Ok(tls_stream) => Either::Left(http.serve_connection(
-                                                    TokioIo::new(tls_stream),
-                                                    TowerToHyperService::new(svc),
-                                                )),
-                                                Err(err) => {
-                                                    error!(?err, "Failed to accept tls stream");
-                                                    return;
-                                                }
-                                            }
-                                        } else {
-                                            Either::Right(http.serve_connection(
-                                                TokioIo::new(tcp_stream),
-                                                TowerToHyperService::new(svc),
-                                            ))
-                                        };
-
-                                        if let Err(err) = serve_connection.await {
-                                            error!(
-                                                target: "nativelink::services",
-                                                ?err,
-                                                "Failed running service"
-                                            );
-                                        }
-                                    }),
-                                    target: "nativelink::services",
-                                    ?remote_addr,
-                                    ?socket_addr,
-                                );
-                            },
-                            Err(err) => {
-                                error!(?err, "Failed to accept tcp connection");
-                            }
-                        }
-                    },
-                }
-            }
-            // Unreachable
-        }));
+        root_futures.push(tcp_accept_loop(
+            tcp_listener,
+            http,
+            svc,
+            maybe_tls_acceptor,
+            socket_addr,
+        ));
     }
 
     {
@@ -815,6 +759,83 @@ async fn inner_main(
     }
 
     Ok(())
+}
+
+/// Create a future that runs a TCP accept loop, spawning a connection
+/// handler for each incoming client.
+///
+/// If `maybe_tls_acceptor` is `Some`, connections are upgraded to TLS
+/// before being served.  Pass `None` for plain-text HTTP/2 (e.g. in
+/// nixception).
+pub fn tcp_accept_loop(
+    tcp_listener: TcpListener,
+    http: auto::Builder<TaskExecutor>,
+    svc: axum::Router,
+    maybe_tls_acceptor: Option<TlsAcceptor>,
+    socket_addr: SocketAddr,
+) -> BoxFuture<'static, Result<(), Error>> {
+    Box::pin(async move {
+        loop {
+            select! {
+                accept_result = tcp_listener.accept() => {
+                    match accept_result {
+                        Ok((tcp_stream, remote_addr)) => {
+                            info!(
+                                target: "nativelink::services",
+                                ?remote_addr,
+                                ?socket_addr,
+                                "Client connected"
+                            );
+
+                            let (http, svc, maybe_tls_acceptor) =
+                                (http.clone(), svc.clone(), maybe_tls_acceptor.clone());
+
+                            background_spawn!(
+                                name: "http_connection",
+                                fut: error_span!(
+                                    "http_connection",
+                                    remote_addr = %remote_addr,
+                                    socket_addr = %socket_addr,
+                                ).in_scope(|| async move {
+                                    let serve_connection = if let Some(tls_acceptor) = maybe_tls_acceptor {
+                                        match tls_acceptor.accept(tcp_stream).await {
+                                            Ok(tls_stream) => Either::Left(http.serve_connection(
+                                                TokioIo::new(tls_stream),
+                                                TowerToHyperService::new(svc),
+                                            )),
+                                            Err(err) => {
+                                                error!(?err, "Failed to accept tls stream");
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        Either::Right(http.serve_connection(
+                                            TokioIo::new(tcp_stream),
+                                            TowerToHyperService::new(svc),
+                                        ))
+                                    };
+
+                                    if let Err(err) = serve_connection.await {
+                                        error!(
+                                            target: "nativelink::services",
+                                            ?err,
+                                            "Failed running service"
+                                        );
+                                    }
+                                }),
+                                target: "nativelink::services",
+                                ?remote_addr,
+                                ?socket_addr,
+                            );
+                        },
+                        Err(err) => {
+                            error!(?err, "Failed to accept tcp connection");
+                        }
+                    }
+                },
+            }
+        }
+    })
 }
 
 /// Common server bootstrap: tokio runtime, tracing, global settings,
