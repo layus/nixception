@@ -15,6 +15,8 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::runner_info::RunnerInfo;
+
 use nativelink_config::schedulers::{
     ExperimentalSimpleSchedulerBackend, NixProxySpec, SchedulerSpec, SimpleSpec,
 };
@@ -176,6 +178,9 @@ fn nix_scheduler_factory(
     let cas_store = store_manager
         .get_store(&spec.cas_store)
         .err_tip(|| format!("'cas_store': '{}' does not exist", spec.cas_store))?;
+    let runner_info = Arc::new(
+        RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
+    );
     let (action_scheduler, worker_scheduler) = NixScheduler::new(
         spec,
         awaited_action_db,
@@ -183,6 +188,7 @@ fn nix_scheduler_factory(
         now_fn,
         ac_store,
         cas_store,
+        runner_info,
     );
     Ok((Some(action_scheduler), Some(worker_scheduler)))
 }

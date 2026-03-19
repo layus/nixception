@@ -33,6 +33,7 @@ use nativelink_util::store_trait::Store;
 use crate::awaited_action_db::AwaitedActionDb;
 use crate::nix_worker::NixWorker;
 use crate::platform_property_manager::PlatformPropertyManager;
+use crate::runner_info::RunnerInfo;
 use crate::simple_scheduler_state_manager::SimpleSchedulerStateManager;
 use crate::worker::{Worker, WorkerTimestamp};
 use crate::worker_scheduler::WorkerScheduler;
@@ -81,6 +82,9 @@ pub struct NixScheduler<
     /// Store manager for data (CAS).
     cas_store: Store,
 
+    /// Runner metadata, computed once at startup.
+    runner_info: Arc<RunnerInfo>,
+
     /// Weak self-reference so we can pass `Arc<dyn WorkerScheduler>` to
     /// spawned [`NixWorker`] instances from `&self`.
     self_ref: OnceLock<Weak<dyn WorkerScheduler>>,
@@ -112,6 +116,7 @@ impl<
         now_fn: NowFn,
         ac_store: Store,
         cas_store: Store,
+        runner_info: Arc<RunnerInfo>,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         Self::new_with_callback(
             spec,
@@ -121,6 +126,7 @@ impl<
             now_fn,
             ac_store,
             cas_store,
+            runner_info,
         )
     }
 
@@ -135,6 +141,7 @@ impl<
         now_fn: NowFn,
         ac_store: Store,
         cas_store: Store,
+        runner_info: Arc<RunnerInfo>,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
 
@@ -152,6 +159,7 @@ impl<
             state_manager,
             ac_store,
             cas_store,
+            runner_info,
             self_ref: OnceLock::new(),
         });
 
@@ -210,6 +218,7 @@ impl<
             operation_id,
             self.cas_store.clone(),
             action_info,
+            self.runner_info.clone(),
         );
         tokio::spawn(worker.run());
 

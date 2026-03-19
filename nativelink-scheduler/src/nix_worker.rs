@@ -22,6 +22,8 @@ use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::StorePath;
 
+use crate::runner_info::RunnerInfo;
+
 use bstr::BString;
 use bytes::Bytes;
 use nativelink_error::{Code, Error, ResultExt, make_err};
@@ -65,6 +67,8 @@ pub(crate) struct NixWorker {
     cas_store: Store,
     /// The action metadata describing what to execute.
     action_info: Arc<ActionInfo>,
+    /// Runner metadata for constructing action derivations.
+    runner_info: Arc<RunnerInfo>,
 }
 
 impl NixWorker {
@@ -74,6 +78,7 @@ impl NixWorker {
         operation_id: OperationId,
         cas_store: Store,
         action_info: Arc<ActionInfo>,
+        runner_info: Arc<RunnerInfo>,
     ) -> Self {
         Self {
             worker_scheduler,
@@ -81,6 +86,7 @@ impl NixWorker {
             operation_id,
             cas_store,
             action_info,
+            runner_info,
         }
     }
 
@@ -333,38 +339,31 @@ impl NixWorker {
             ("out".into(), BString::default()),
         ]);
 
-        let builder_path: StorePath<&str> = StorePath::from_absolute_path_full(
-            "/nix/store/hmy8rl9msg5wmvbzgq2sy9yrwvvm10ig-runner.drv",
-        )
-        .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?
-        .0;
-        let builder_hash: [u8; 32] = [
-            95, 148, 113, 92, 234, 230, 14, 255, 41, 235, 158, 201, 209, 193, 72, 39, 43, 158, 117,
-            18, 65, 81, 255, 48, 142, 184, 249, 84, 255, 69, 163, 171,
-        ];
+        let ri = &self.runner_info;
 
-        let builder_info = self
-            .cas_store
-            .downcast_ref::<NixStore>(None)
-            .unwrap()
-            .as_pin()
-            .query_path_info("/nix/store/ramr9g2186x57rv2pv0bvd8ya159r970-runner")?
-            .ok_or(make_err!(Code::Internal, "Could not query path info"))?;
-        let builder_deriver = StorePath::from_absolute_path(&builder_info.deriver.0.0)
-            .map_err(|e| make_err!(Code::Internal, "Failed to parse store path: {e}"))?;
+        // Use the runner .drv store path directly from RunnerInfo rather than
+        // querying the Nix daemon's query_path_info (whose `deriver` field may
+        // not always contain a valid absolute store path).
+        let builder_deriver = ri.drv_store_path.clone();
+
         let mut derivation: Derivation = Derivation {
             arguments: vec!["set -x; eval \"$script\"".into()],
-            builder: "/nix/store/ramr9g2186x57rv2pv0bvd8ya159r970-runner/bin/runner".into(),
+            builder: ri.builder_path.clone().into(),
             environment,
             input_derivations: BTreeMap::from([(builder_deriver, BTreeSet::from(["out".into()]))]),
             input_sources: entries.iter().map(|e| e.store_path.to_owned()).collect(),
             outputs,
-            system: "x86_64-linux".into(),
+            system: ri.system.clone().into(),
         };
 
-        let hash_modulo = derivation.hash_derivation_modulo(|a| {
-            assert_eq!(a, &builder_path);
-            builder_hash
+        let hash_modulo = derivation.hash_derivation_modulo(|input_drv_path| {
+            // The only input derivation is the runner.
+            assert_eq!(
+                input_drv_path.to_absolute_path(),
+                ri.drv_store_path.to_absolute_path(),
+                "Unexpected input derivation"
+            );
+            ri.hash_derivation_modulo
         });
         derivation
             .calculate_output_paths("reapi-action", &hash_modulo)

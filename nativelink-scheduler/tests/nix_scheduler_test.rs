@@ -25,6 +25,7 @@ use nativelink_macro::nativelink_test;
 use nativelink_proto::com::github::trace_machina::nativelink::remote_execution::UpdateForWorker;
 use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
 use nativelink_scheduler::nix_scheduler::NixScheduler;
+use nativelink_scheduler::runner_info::RunnerInfo;
 use nativelink_scheduler::worker::Worker;
 use nativelink_scheduler::worker_scheduler::WorkerScheduler;
 use nativelink_store::memory_store::MemoryStore;
@@ -90,6 +91,7 @@ fn make_nix_scheduler() -> (
         MockInstantWrapped::default,
         ac_store,
         cas_store,
+        Arc::new(RunnerInfo::dummy()),
     )
 }
 
@@ -120,6 +122,7 @@ async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
         MockInstantWrapped::default,
         ac_store,
         cas_store,
+        Arc::new(RunnerInfo::dummy()),
     );
 
     let action_digest = DigestInfo::new([2u8; 32], 100);
@@ -589,6 +592,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
         MockInstantWrapped::default,
         ac_store,
         cas_store,
+        Arc::new(RunnerInfo::dummy()),
     );
 
     // Call filter_operations with no actions added - should return an empty stream

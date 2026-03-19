@@ -33,6 +33,7 @@ use nativelink_config::stores::NixSpec;
 use nativelink_error::{Error, ResultExt};
 use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
 use nativelink_scheduler::nix_scheduler::NixScheduler;
+use nativelink_scheduler::runner_info::RunnerInfo;
 use nativelink_service::ac_server::AcServer;
 use nativelink_service::bytestream_server::ByteStreamServer;
 use nativelink_service::capabilities_server::CapabilitiesServer;
@@ -82,6 +83,11 @@ async fn inner_main(
         .err_tip(|| "Failed to create NIX_STORE")?;
     store_manager.add_store("NIX_STORE", Store::new(nix_store));
 
+    // ── Runner info ────────────────────────────────────────────────────
+    let runner_info = Arc::new(
+        RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
+    );
+
     // ── Scheduler ──────────────────────────────────────────────────────
     let nix_proxy_spec = NixProxySpec {
         ac_store: "VOID".to_string(),
@@ -106,6 +112,7 @@ async fn inner_main(
         SystemTime::now,
         ac_store,
         cas_store,
+        runner_info,
     );
 
     let mut action_schedulers = HashMap::new();

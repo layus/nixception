@@ -23,6 +23,7 @@ pub mod nix_scheduler;
 pub mod nix_worker;
 pub mod platform_property_manager;
 pub mod property_modifier_scheduler;
+pub mod runner_info;
 pub mod simple_scheduler;
 mod simple_scheduler_state_manager;
 pub mod store_awaited_action_db;

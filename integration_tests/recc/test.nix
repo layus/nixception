@@ -59,7 +59,7 @@ stdenv.mkDerivation {
 
     # Start nixception in the background.
     echo "Starting nixception…"
-    RUST_BACKTRACE=1 nixception 2>&1 | tee -i nixception.log &
+    RUST_BACKTRACE=1 nixception >nixception.log 2>&1 &
     NIXCEPTION_PID=$!
 
     # Wait until nixception is accepting TCP connections.
@@ -77,7 +77,7 @@ stdenv.mkDerivation {
       RECC_SERVER=127.0.0.1:50051 \
       ${buildbox}/bin/recc \
         ${gcc}/bin/g++ -DBUILD_CONSTANT=42 -c main.cpp -o main.o \
-      2>&1 | tee -i recc.log
+      2>&1 | tee recc.log
 
     # ── verify ────────────────────────────────────────────────────────
     if [ ! -f main.o ]; then
@@ -94,7 +94,9 @@ stdenv.mkDerivation {
     echo "SUCCESS: main.o was created by recc via nixception"
 
     # Check the nixception log for obvious errors.
-    if grep -qi "ERROR" nixception.log; then
+    # Match tracing's " ERROR " level indicator (surrounded by spaces)
+    # but not struct fields like "error_msg" in debug output.
+    if grep -q ' ERROR ' nixception.log; then
       echo "FAIL: nixception log contains errors"
       cat nixception.log
       kill "$NIXCEPTION_PID" 2>/dev/null || true
