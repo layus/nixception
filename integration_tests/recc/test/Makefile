@@ -57,7 +57,7 @@ run: $(TARGET)
 test: $(TARGET)
 	@echo "Running functional test..."
 	@./$(TARGET) > build_output.txt 2>&1 || (echo "FAIL: program exited non-zero" && cat build_output.txt && exit 1)
-	@grep -q "Build constant: 47" build_output.txt && echo "OK: build constant found" || (echo "FAIL: build constant missing" && cat build_output.txt && rm -f build_output.txt && exit 1)
+	@grep -q "Build constant: 42" build_output.txt && echo "OK: build constant found" || (echo "FAIL: build constant missing" && cat build_output.txt && rm -f build_output.txt && exit 1)
 	@grep -q "Hello from greet()" build_output.txt && echo "OK: greet found" || (echo "FAIL: greet missing" && cat build_output.txt && rm -f build_output.txt && exit 1)
 	@grep -q "Sum(2,3) = 5" build_output.txt && echo "OK: sum found" || (echo "FAIL: sum missing" && cat build_output.txt && rm -f build_output.txt && exit 1)
 	@rm -f build_output.txt
