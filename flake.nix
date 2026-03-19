@@ -169,14 +169,58 @@
             }
           );
 
-        nixceptionFor = p:
-          (craneLibFor p).buildPackage (
+        nixceptionFor = p: let
+          nixceptionBin = (craneLibFor p).buildPackage (
             (commonArgsFor p)
             // {
               cargoArtifacts = cargoArtifactsFor p;
               cargoExtraArgs = "--bin nixception";
             }
           );
+          # Default runner (coreutils + util-linux + bashNonInteractive).
+          # Its store paths are substituted into the setup hook at fixupPhase
+          # time so the hook can fall back to them when nixceptionRunner is
+          # not set by the consumer.
+          defaultRunner = pkgs.callPackage ./tools/runner.nix {};
+        in
+          nixceptionBin.overrideAttrs (old: {
+            # ── cmake-style setup hook ───────────────────────────────────────
+            # setupHooks is processed by stdenv's fixupPhase: each listed file
+            # is run through substituteAll (replacing @var@ with env vars) and
+            # appended to $out/nix-support/setup-hook.  Consumers that list
+            # nixception in nativeBuildInputs automatically source that file.
+            # This is exactly how cmake propagates its cmakeConfigurePhase hook.
+            setupHooks = (old.setupHooks or []) ++ [./tools/nixception-setup-hook.sh];
+
+            # Prevent the hook from registering phases during nixception's own
+            # Rust build.  stdenv merges setupHooks into nativeBuildInputs of
+            # the package that declares them, so without this guard the hook
+            # would try to start a nixception server before cargo runs.
+            dontUseNixceptionHook = "1";
+
+            # Substituted into the hook script by substituteAll at fixupPhase.
+            defaultRunnerOut = "${defaultRunner}";
+            defaultRunnerDrv = "${defaultRunner.drvPath}";
+
+            # wait4x and moreutils (for `ts`) are invoked via their full store
+            # paths, baked into the hook at fixupPhase time by substituteAll.
+            wait4x = "${pkgs.wait4x}";
+            moreutils = "${pkgs.moreutils}";
+
+            passthru =
+              (old.passthru or {})
+              // {
+                # Returns a space-separated "outPath drvPath" string suitable for
+                # setting as the nixceptionRunner derivation attribute.  The hook
+                # reads this at build time to configure the nixception server.
+                #
+                # Example usage in a derivation:
+                #   nixceptionRunner = nixception.mkRunner [ myTool otherTool ];
+                mkRunner = extraRuntimeInputs: let
+                  runner = pkgs.callPackage ./tools/runner.nix {inherit extraRuntimeInputs;};
+                in "${runner} ${runner.drvPath}";
+              };
+          });
 
         nativeTargetPkgs =
           if pkgs.system == "x86_64-linux"
@@ -426,9 +470,8 @@
               inherit (pkgs) gcc coreutils;
             };
             recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
-              inherit nixception;
-              inherit buildbox wait4x;
-              inherit (pkgs) gcc moreutils;
+              inherit nixception buildbox;
+              inherit (pkgs) gcc;
             };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
