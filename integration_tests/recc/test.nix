@@ -116,7 +116,7 @@ in
           # The output goes directly to the Nix build log (fd 2) rather than a file,
           # which keeps $out deterministic.
           echo "Starting nixception…"
-          RUST_BACKTRACE=1 nixception 2>&1 | ts '[nixception] %H:%M:%.S' >&2 &
+          RUST_BACKTRACE=1 nixception > >(ts '[nixception] %H:%M:%.S' >&2) 2>&1 &
           NIXCEPTION_PID=$!
 
           # Wait until nixception is accepting TCP connections.
@@ -149,7 +149,7 @@ in
             CC="./recc-gpp" \
             CXX="./recc-gpp" \
             CPPFLAGS=-DBUILD_CONSTANT=42 \
-            make test 2>&1 | ts '[make] %H:%M:%.S' >&2
+            make test > >(ts '[make] %H:%M:%.S' >&2) 2>&1
 
           # ── verify ────────────────────────────────────────────────────────
           if [ ! -f demo_app ]; then
