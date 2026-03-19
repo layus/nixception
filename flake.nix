@@ -188,20 +188,6 @@
         nativelink = nativelinkFor nativeTargetPkgs;
         nixception = nixceptionFor nativeTargetPkgs;
 
-        # The "runner" is the small bash wrapper used as the builder of every
-        # REAPI action derivation that nixception creates.
-        runner = pkgs.callPackage ./tools/runner.nix {
-          bash = pkgs.bashNonInteractive;
-        };
-
-        # Wrapped nixception binary with NIXCEPTION_RUNNER_* env vars baked in
-        # so that RunnerInfo::from_env() can discover the runner at runtime.
-        nixceptionWrapped = pkgs.writeShellScriptBin "nixception" ''
-          export NIXCEPTION_RUNNER_OUT=${runner}
-          export NIXCEPTION_RUNNER_DRV=${runner.drvPath}
-          exec ${nixception}/bin/nixception "$@"
-        '';
-
         # These two can be built by all build platforms. This is not true for
         # darwin targets which are only buildable via native compilation.
         nativelink-aarch64-linux = nativelinkFor pkgs.pkgsCross.aarch64-multiplatform-musl;
@@ -435,14 +421,14 @@
                 inherit nativelink buck2;
               };
             recc-with-nativelink-test = pkgs.callPackage integration_tests/recc/recc-with-nativelink-test.nix {
-              nixception = nixceptionWrapped;
+              inherit nixception;
               inherit buildbox wait4x;
               inherit (pkgs) gcc coreutils;
             };
             recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
-              nixception = nixceptionWrapped;
+              inherit nixception;
               inherit buildbox wait4x;
-              inherit (pkgs) gcc coreutils;
+              inherit (pkgs) gcc coreutils moreutils;
             };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
