@@ -24,6 +24,7 @@ use hyper_util::rt::tokio::TokioIo;
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use mimalloc::MiMalloc;
+use nativelink::run_server;
 use nativelink_config::cas_server::{
     AcStoreConfig, ByteStreamConfig, CapabilitiesConfig, CapabilitiesRemoteExecutionConfig,
     CasStoreConfig, ExecutionConfig, WithInstanceName,
@@ -43,29 +44,18 @@ use nativelink_store::nix_store::NixStore;
 use nativelink_store::noop_store::NoopStore;
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::background_spawn;
-use nativelink_util::common::fs::set_open_file_limit;
-use nativelink_util::digest_hasher::{DigestHasherFunc, set_default_digest_hasher_func};
-#[cfg(target_family = "unix")]
-use nativelink_util::shutdown_guard::Priority;
+use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::shutdown_guard::ShutdownGuard;
-use nativelink_util::store_trait::{
-    DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG, Store, set_default_digest_size_health_check,
-};
+use nativelink_util::store_trait::{DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG, Store};
 use nativelink_util::task::TaskExecutor;
-use nativelink_util::telemetry::init_tracing;
 use tokio::net::TcpListener;
 use tokio::select;
-#[cfg(target_family = "unix")]
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, broadcast, oneshot};
 use tonic::service::Routes;
-use tracing::{error, error_span, info, trace_span, warn};
+use tracing::{error, error_span, info, warn};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-
-/// Broadcast Channel Capacity
-const BROADCAST_CAPACITY: usize = 1;
 
 async fn inner_main(
     shutdown_tx: broadcast::Sender<ShutdownGuard>,
@@ -272,65 +262,11 @@ async fn inner_main(
 }
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
-    // ── Global config ──────────────────────────────────────────────────
-    const MAX_OPEN_FILES: usize = 512;
-
-    #[expect(clippy::disallowed_methods, reason = "starting main runtime")]
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    #[expect(clippy::disallowed_methods, reason = "tracing init on main runtime")]
-    runtime.block_on(async { tokio::spawn(async { init_tracing() }).await? })?;
-
-    set_open_file_limit(MAX_OPEN_FILES);
-    set_default_digest_hasher_func(DigestHasherFunc::Sha256)?;
-    set_default_digest_size_health_check(DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG)?;
-
-    // ── Shutdown plumbing ──────────────────────────────────────────────
-    let (shutdown_tx, _) = broadcast::channel::<ShutdownGuard>(BROADCAST_CAPACITY);
-    #[cfg(target_family = "unix")]
-    let shutdown_tx_clone = shutdown_tx.clone();
-    #[cfg(target_family = "unix")]
-    let mut shutdown_guard = ShutdownGuard::default();
-
-    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
-    runtime.spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen to SIGINT");
-        eprintln!("User terminated process via SIGINT");
-        std::process::exit(130);
-    });
-
-    #[allow(unused_variables)]
-    let (scheduler_shutdown_tx, scheduler_shutdown_rx) = oneshot::channel();
-
-    #[cfg(target_family = "unix")]
-    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
-    runtime.spawn(async move {
-        signal(SignalKind::terminate())
-            .expect("Failed to listen to SIGTERM")
-            .recv()
-            .await;
-        warn!("Process terminated via SIGTERM");
-        drop(shutdown_tx_clone.send(shutdown_guard.clone()));
-        scheduler_shutdown_rx
-            .await
-            .expect("Failed to receive scheduler shutdown");
-        let () = shutdown_guard.wait_for(Priority::P0).await;
-        warn!("Successfully shut down nixception.");
-        std::process::exit(143);
-    });
-
-    #[expect(clippy::disallowed_methods, reason = "waiting on everything to finish")]
-    runtime
-        .block_on(async {
-            trace_span!("main")
-                .in_scope(|| async { inner_main(shutdown_tx, scheduler_shutdown_tx).await })
-                .await
-        })
-        .err_tip(|| "nixception main() failed")?;
-
-    Ok(())
+    run_server(
+        "nixception",
+        512,
+        DigestHasherFunc::Sha256,
+        DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG,
+        |shutdown_tx, scheduler_shutdown_tx| inner_main(shutdown_tx, scheduler_shutdown_tx),
+    )
 }

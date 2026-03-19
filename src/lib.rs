@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::future::Future;
 use core::net::SocketAddr;
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
@@ -64,7 +65,8 @@ use tokio::net::TcpListener;
 use tokio::select;
 #[cfg(target_family = "unix")]
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::oneshot::Sender;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
@@ -126,6 +128,7 @@ impl RoutesExt for Routes {
 async fn inner_main(
     cfg: CasConfig,
     shutdown_tx: broadcast::Sender<ShutdownGuard>,
+    scheduler_shutdown_tx: Sender<()>,
 ) -> Result<(), Error> {
     const fn into_encoding(from: HttpCompressionAlgorithm) -> Option<CompressionEncoding> {
         match from {
@@ -799,6 +802,7 @@ async fn inner_main(
     let mut shutdown_rx = shutdown_tx.subscribe();
     root_futures.push(Box::pin(async move {
         if let Ok(shutdown_guard) = shutdown_rx.recv().await {
+            let _ = scheduler_shutdown_tx.send(());
             for (_name, scheduler) in worker_schedulers {
                 scheduler.shutdown(shutdown_guard.clone()).await;
             }
@@ -813,21 +817,104 @@ async fn inner_main(
     Ok(())
 }
 
+/// Common server bootstrap: tokio runtime, tracing, global settings,
+/// signal handlers, and shutdown plumbing.
+///
+/// `inner` receives the shutdown broadcast sender and the scheduler
+/// shutdown oneshot sender, and should return a future that runs the
+/// server logic.  Both `nativelink` and `nixception` delegate to this
+/// so signal handling and process lifecycle are consistent.
+///
+/// # Errors
+///
+/// Returns an error if the runtime cannot be built, tracing fails to
+/// initialize, or the server encounters a fatal error.
+pub fn run_server<F, Fut>(
+    name: &str,
+    max_open_files: usize,
+    digest_hasher: DigestHasherFunc,
+    digest_size_health_check: usize,
+    inner: F,
+) -> Result<(), Box<dyn core::error::Error>>
+where
+    F: FnOnce(broadcast::Sender<ShutdownGuard>, oneshot::Sender<()>) -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    #[expect(clippy::disallowed_methods, reason = "starting main runtime")]
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    // The OTLP exporters need to run in a Tokio context.
+    // Do this first so all the other logging works.
+    #[expect(clippy::disallowed_methods, reason = "tracing init on main runtime")]
+    runtime.block_on(async { tokio::spawn(async { init_tracing() }).await? })?;
+
+    set_open_file_limit(max_open_files);
+    set_default_digest_hasher_func(digest_hasher)?;
+    set_default_digest_size_health_check(digest_size_health_check)?;
+
+    // Initiates the shutdown process by broadcasting the shutdown signal
+    // via the `oneshot::Sender` to all listeners.  Each listener will
+    // perform its cleanup and then drop its `oneshot::Sender`, signaling
+    // completion.  Once all senders are dropped the process can exit.
+    let (shutdown_tx, _) = broadcast::channel::<ShutdownGuard>(BROADCAST_CAPACITY);
+    #[cfg(target_family = "unix")]
+    let shutdown_tx_clone = shutdown_tx.clone();
+    #[cfg(target_family = "unix")]
+    let mut shutdown_guard = ShutdownGuard::default();
+
+    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
+    runtime.spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen to SIGINT");
+        eprintln!("User terminated process via SIGINT");
+        std::process::exit(130);
+    });
+
+    #[allow(unused_variables)]
+    let (scheduler_shutdown_tx, scheduler_shutdown_rx) = oneshot::channel();
+
+    let shutdown_msg = format!("Successfully shut down {name}.");
+
+    #[cfg(target_family = "unix")]
+    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
+    runtime.spawn(async move {
+        signal(SignalKind::terminate())
+            .expect("Failed to listen to SIGTERM")
+            .recv()
+            .await;
+        warn!("Process terminated via SIGTERM");
+        drop(shutdown_tx_clone.send(shutdown_guard.clone()));
+        let () = shutdown_guard.wait_for(Priority::P0).await;
+        warn!("{}", shutdown_msg);
+        std::process::exit(143);
+    });
+
+    let err_msg = format!("{name} main() failed");
+
+    #[expect(clippy::disallowed_methods, reason = "waiting on everything to finish")]
+    runtime
+        .block_on(async {
+            trace_span!("main")
+                .in_scope(|| inner(shutdown_tx, scheduler_shutdown_tx))
+                .await
+        })
+        .err_tip(|| err_msg)?;
+    Ok(())
+}
+
 /// Run the server with the given [`CasConfig`].
 ///
-/// This sets up the tokio runtime, tracing, global config, shutdown handlers,
-/// and then calls the async `inner_main` that starts all stores, schedulers,
-/// and servers.
+/// Extracts global settings from the config and delegates to
+/// [`run_server`] for runtime setup and signal handling.
 ///
 /// # Errors
 ///
 /// Returns an error if the runtime cannot be built, tracing fails to
 /// initialize, or the server encounters a fatal error.
 pub fn run_with_config(mut cfg: CasConfig) -> Result<(), Box<dyn core::error::Error>> {
-    if cfg!(feature = "worker_find_logging") {
-        info!("worker_find_logging enabled");
-    }
-
     let global_cfg = if let Some(global_cfg) = &mut cfg.global {
         if global_cfg.max_open_files == 0 {
             global_cfg.max_open_files = fs::DEFAULT_OPEN_FILE_LIMIT;
@@ -844,62 +931,16 @@ pub fn run_with_config(mut cfg: CasConfig) -> Result<(), Box<dyn core::error::Er
             default_digest_size_health_check: DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG,
         }
     };
-    set_open_file_limit(global_cfg.max_open_files);
-    set_default_digest_hasher_func(DigestHasherFunc::from(
-        global_cfg
-            .default_digest_hash_function
-            .unwrap_or(ConfigDigestHashFunction::Sha256),
-    ))?;
-    set_default_digest_size_health_check(global_cfg.default_digest_size_health_check)?;
 
-    #[expect(clippy::disallowed_methods, reason = "starting main runtime")]
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    // The OTLP exporters need to run in a Tokio context.
-    #[expect(clippy::disallowed_methods, reason = "tracing init on main runtime")]
-    runtime.block_on(async { tokio::spawn(async { init_tracing() }).await? })?;
-
-    // Initiates the shutdown process by broadcasting the shutdown signal via the `oneshot::Sender` to all listeners.
-    // Each listener will perform its cleanup and then drop its `oneshot::Sender`, signaling completion.
-    // Once all `oneshot::Sender` instances are dropped, the worker knows it can safely terminate.
-    let (shutdown_tx, _) = broadcast::channel::<ShutdownGuard>(BROADCAST_CAPACITY);
-    #[cfg(target_family = "unix")]
-    let shutdown_tx_clone = shutdown_tx.clone();
-    #[cfg(target_family = "unix")]
-    let mut shutdown_guard = ShutdownGuard::default();
-
-    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
-    runtime.spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen to SIGINT");
-        eprintln!("User terminated process via SIGINT");
-        std::process::exit(130);
-    });
-
-    #[cfg(target_family = "unix")]
-    #[expect(clippy::disallowed_methods, reason = "signal handler on main runtime")]
-    runtime.spawn(async move {
-        signal(SignalKind::terminate())
-            .expect("Failed to listen to SIGTERM")
-            .recv()
-            .await;
-        warn!("Process terminated via SIGTERM",);
-        drop(shutdown_tx_clone.send(shutdown_guard.clone()));
-        let () = shutdown_guard.wait_for(Priority::P0).await;
-        warn!("Successfully shut down nativelink.",);
-        std::process::exit(143);
-    });
-
-    #[expect(clippy::disallowed_methods, reason = "waiting on everything to finish")]
-    runtime
-        .block_on(async {
-            trace_span!("main")
-                .in_scope(|| async { inner_main(cfg, shutdown_tx).await })
-                .await
-        })
-        .err_tip(|| "main() function failed")?;
-    Ok(())
+    run_server(
+        "nativelink",
+        global_cfg.max_open_files,
+        DigestHasherFunc::from(
+            global_cfg
+                .default_digest_hash_function
+                .unwrap_or(ConfigDigestHashFunction::Sha256),
+        ),
+        global_cfg.default_digest_size_health_check,
+        |shutdown_tx, scheduler_shutdown_tx| inner_main(cfg, shutdown_tx, scheduler_shutdown_tx),
+    )
 }
