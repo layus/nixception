@@ -41,7 +41,16 @@
             cat > $out/bin/g++ <<'EOF'
       #!/bin/sh
       # Sleep for 10s to make non-cached runs noticeably slower than cached runs.
-      sleep 10
+      # Skip the sleep when g++ is only being asked to generate dependency files
+      # (the -M / -MM / -MF family of flags), which recc invokes locally and which
+      # do not exercise the remote execution path.
+      case " $* " in
+        *\ -M\ *|*\ -MM\ *|*\ -MF\ *|*\ -MD\ *|*\ -MMD\ *)
+          ;;
+        *)
+          sleep 10
+          ;;
+      esac
       exec ${gcc}/bin/g++ "$@"
       EOF
             chmod +x $out/bin/g++
@@ -102,6 +111,8 @@ in
     buildPhase = ''
           runHook preBuild
 
+          BUILD_START=$SECONDS
+
           # The recursive-nix sandbox automatically sets
           #   NIX_REMOTE=unix:///build/.nix-socket
           # nixception's NixStore backend now reads NIX_REMOTE to discover
@@ -149,7 +160,7 @@ in
             CC="./recc-gpp" \
             CXX="./recc-gpp" \
             CPPFLAGS=-DBUILD_CONSTANT=42 \
-            make test > >(ts '[make] %H:%M:%.S' >&2) 2>&1
+            make -j4 test > >(ts '[make] %H:%M:%.S' >&2) 2>&1
 
           # ── verify ────────────────────────────────────────────────────────
           if [ ! -f demo_app ]; then
@@ -162,6 +173,9 @@ in
 
           kill "$NIXCEPTION_PID" 2>/dev/null || true
           wait "$NIXCEPTION_PID" 2>/dev/null || true
+
+          BUILD_END=$SECONDS
+          echo "buildPhase completed in $((BUILD_END - BUILD_START)) seconds"
 
           runHook postBuild
     '';
