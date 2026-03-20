@@ -456,6 +456,9 @@
               inherit nixceptionHook buildbox;
               inherit (pkgs) gcc fetchurl;
             };
+            zlib-nixception-recc-test = pkgs.callPackage integration_tests/recc/zlib-with-nixception.nix {
+              inherit nixceptionHook buildbox;
+            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;

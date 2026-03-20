@@ -313,6 +313,15 @@ impl NixWorker {
             // Create output directory structure before running the command
             // so that stdout/stderr redirections have a target.
             .chain(once("mkdir -p $out/outputs".into()))
+            .chain(command.output_directories.clone().into_iter().map(|dir| {
+                format!("mkdir -p {dir}")
+            }))
+            .chain(command.output_files.clone().into_iter().map(|file| {
+                format!("mkdir -p $(dirname {file})")
+            }))
+            .chain(command.output_paths.clone().into_iter().map(|path| {
+                format!("mkdir -p $(dirname {path})")
+            }))
             // Run the actual command, capturing stdout and stderr.
             .chain(once(format!(
                 "{cmd} >$out/stdout 2>$out/stderr\necho $? >$out/exitcode",
