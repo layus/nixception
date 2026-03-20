@@ -459,6 +459,12 @@
             zlib-nixception-recc-test = pkgs.callPackage integration_tests/recc/zlib-with-nixception.nix {
               inherit nixceptionHook buildbox;
             };
+            spdlog-nixception-recc-test = pkgs.callPackage integration_tests/recc/spdlog-with-nixception.nix {
+              inherit nixceptionHook buildbox;
+            };
+            mongodb-nixception-recc-test = pkgs.callPackage integration_tests/recc/mongodb-with-nixception.nix {
+              inherit nixceptionHook buildbox;
+            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;

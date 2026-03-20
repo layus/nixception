@@ -302,43 +302,88 @@ impl NixWorker {
             .iter()
             .map(|e| {
                 format!(
-                    "mkdir -p $(dirname {path})\nln {store_path} {path} || cp {store_path} {path} --no-preserve=all",
+                    concat!(
+                        "mkdir -p $(dirname {path})\n",
+                        // "ln {store_path} {path} || ",
+                        "cp {store_path} {path} --no-preserve=all",
+                    ),
                     path = e.path.to_string_lossy(),
                     store_path = e.store_path.to_absolute_path()
                 )
             })
-            .chain(command.environment_variables.into_iter().map(|var| {
-                format!("export {name}='{value}'", name = var.name, value = var.value)
-            }))
+            .chain(once(format!("tree"))) // for debugging: print the input tree
+            // From now on, we only deal with outputs, and these are relative to
+            // the working directory, so `cd` into it first.
+            .chain(once(format!(
+                "mkdir -p {cwd} && cd {cwd}",
+                cwd = command.working_directory
+            )))
             // Create output directory structure before running the command
             // so that stdout/stderr redirections have a target.
+            .chain(
+                command
+                    .output_directories
+                    .clone()
+                    .into_iter()
+                    .map(|dir| format!("mkdir -p {dir}")),
+            )
+            .chain(
+                command
+                    .output_files
+                    .clone()
+                    .into_iter()
+                    .map(|file| format!("mkdir -p $(dirname {file})")),
+            )
+            .chain(
+                command
+                    .output_paths
+                    .clone()
+                    .into_iter()
+                    .map(|path| format!("mkdir -p $(dirname {path})")),
+            )
+            // Create $out for stdout, stderr and exitcode.
+            // Prepare $out/outputs for the actual outputs extracted later.
             .chain(once("mkdir -p $out/outputs".into()))
-            .chain(command.output_directories.clone().into_iter().map(|dir| {
-                format!("mkdir -p {dir}")
-            }))
-            .chain(command.output_files.clone().into_iter().map(|file| {
-                format!("mkdir -p $(dirname {file})")
-            }))
-            .chain(command.output_paths.clone().into_iter().map(|path| {
-                format!("mkdir -p $(dirname {path})")
+            .chain(once(format!("("))) // Start a subshell so that `export` commands do not affect the rest of the script (`tree` in particular).
+            .chain(command.environment_variables.into_iter().map(|var| {
+                format!(
+                    "export {name}='{value}'",
+                    name = var.name,
+                    value = var.value
+                )
             }))
             // Run the actual command, capturing stdout and stderr.
             .chain(once(format!(
-                "{cmd} >$out/stdout 2>$out/stderr\necho $? >$out/exitcode",
-                cmd = command.arguments.join(" ")
+                concat!(
+                    "{cmd} >$out/stdout 2>$out/stderr\n",
+                    "echo $? >$out/exitcode",
+                ),
+                cmd = command.arguments.join(" "),
             )))
+            .chain(once(format!(")"))) // End of subshell.
+            .chain(once(format!("tree"))) // for debugging: print the output tree after execution
             // Copy outputs into $out/outputs/. Use || true so that
             // missing outputs do not cause the nix build to fail — the
             // real exit code is already saved in $out/exitcode.
-            .chain(command.output_directories.into_iter().map(|dir| {
-                format!("cp --parents -r {dir} $out/outputs || true")
-            }))
-            .chain(command.output_files.into_iter().map(|file| {
-                format!("cp --parents {file} $out/outputs || true")
-            }))
-            .chain(command.output_paths.into_iter().map(|path| {
-                format!("cp --parents {path} $out/outputs || true")
-            }))
+            .chain(
+                command
+                    .output_directories
+                    .into_iter()
+                    .map(|dir| format!("cp --parents -r {dir} $out/outputs || true")),
+            )
+            .chain(
+                command
+                    .output_files
+                    .into_iter()
+                    .map(|file| format!("cp --parents {file} $out/outputs || true")),
+            )
+            .chain(
+                command
+                    .output_paths
+                    .into_iter()
+                    .map(|path| format!("cp --parents {path} $out/outputs || true")),
+            )
+            .chain(once(format!("tree $out"))) // for debugging: print the final output tree
             .collect::<Vec<_>>()
             .join("\n");
 

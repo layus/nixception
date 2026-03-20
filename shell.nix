@@ -11,6 +11,7 @@ pkgs.callPackage (
     vscode-json-languageserver,
     package-version-server,
     clang-tools,
+    nodejs_24,
   }:
     mkShell {
       strictDeps = true;
@@ -24,6 +25,7 @@ pkgs.callPackage (
         vscode-json-languageserver
         package-version-server
         clang-tools
+        nodejs_24
       ];
       buildInputs = [
         # add desired native packages

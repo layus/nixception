@@ -20,6 +20,7 @@
   writeShellApplication,
   coreutils,
   util-linux,
+  tree,
   bashNonInteractive,
   # Additional packages to place on PATH when the runner executes an action.
   # These are listed first in runtimeInputs so they take precedence over the
@@ -28,7 +29,7 @@
 }:
 writeShellApplication {
   name = "runner";
-  runtimeInputs = extraRuntimeInputs ++ [coreutils util-linux bashNonInteractive];
+  runtimeInputs = extraRuntimeInputs ++ [coreutils util-linux bashNonInteractive tree];
   text = ''
     exec "${bashNonInteractive}/bin/bash" -c "$*"
   '';
