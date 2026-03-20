@@ -61,7 +61,7 @@ nixceptionStartPhase() {
         NIXCEPTION_RUNNER_DRV="@runnerDrv@" \
         RUST_BACKTRACE=1 \
         @nixception@/bin/nixception \
-        > >(@moreutils@/bin/ts '[nixception] %H:%M:%.S' >&2) 2>&1 &
+        > >(@moreutils@/bin/ts -s '[nixception] %H:%M:%.S' >&2) 2>&1 &
     local _pid=$!
 
     # ── Register shutdown with stdenv's exit hooks ────────────────────────────
