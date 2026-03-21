@@ -79,6 +79,7 @@ async fn inner_main(
     let nix_store = NixStore::new(&NixSpec { socket_path: None })
         .await
         .err_tip(|| "Failed to create NIX_STORE")?;
+    let nix_connection = nix_store.connection();
     store_manager.add_store(NIX_STORE, Store::new(nix_store));
 
     // ── Runner info ────────────────────────────────────────────────────
@@ -110,6 +111,7 @@ async fn inner_main(
         SystemTime::now,
         ac_store,
         cas_store,
+        nix_connection,
         runner_info,
     );
 

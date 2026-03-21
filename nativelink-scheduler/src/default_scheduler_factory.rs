@@ -21,8 +21,9 @@ use nativelink_config::schedulers::{
     ExperimentalSimpleSchedulerBackend, NixProxySpec, SchedulerSpec, SimpleSpec,
 };
 use nativelink_config::stores::EvictionPolicy;
-use nativelink_error::{Error, ResultExt, make_input_err};
+use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_proto::com::github::trace_machina::nativelink::events::OriginEvent;
+use nativelink_store::nix_store::NixStore;
 use nativelink_store::redis_store::RedisStore;
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::instant_wrapper::InstantWrapper;
@@ -178,6 +179,16 @@ fn nix_scheduler_factory(
     let cas_store = store_manager
         .get_store(&spec.cas_store)
         .err_tip(|| format!("'cas_store': '{}' does not exist", spec.cas_store))?;
+    let nix_connection = cas_store
+        .downcast_ref::<NixStore>(None)
+        .ok_or_else(|| {
+            make_err!(
+                Code::InvalidArgument,
+                "'cas_store' ('{}') is not a NixStore — cannot extract NixDaemonConnection",
+                spec.cas_store
+            )
+        })?
+        .connection();
     let runner_info = Arc::new(
         RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
     );
@@ -188,6 +199,7 @@ fn nix_scheduler_factory(
         now_fn,
         ac_store,
         cas_store,
+        nix_connection,
         runner_info,
     );
     Ok((Some(action_scheduler), Some(worker_scheduler)))

@@ -28,7 +28,8 @@ use bstr::BString;
 use bytes::Bytes;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
-use nativelink_store::nix_store::{NixStore, key_to_store_path};
+use nativelink_store::nix_daemon_connection::NixDaemonConnection;
+use nativelink_store::nix_store::key_to_store_path;
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, FileInfo, NameOrPath, OperationId, WorkerId,
 };
@@ -65,6 +66,8 @@ pub(crate) struct NixWorker {
     operation_id: OperationId,
     /// CAS store used to fetch action inputs and upload derivations.
     cas_store: Store,
+    /// Shared connection to the Nix daemon.
+    connection: Arc<NixDaemonConnection>,
     /// The action metadata describing what to execute.
     action_info: Arc<ActionInfo>,
     /// Runner metadata for constructing action derivations.
@@ -77,6 +80,7 @@ impl NixWorker {
         worker_id: WorkerId,
         operation_id: OperationId,
         cas_store: Store,
+        connection: Arc<NixDaemonConnection>,
         action_info: Arc<ActionInfo>,
         runner_info: Arc<RunnerInfo>,
     ) -> Self {
@@ -85,6 +89,7 @@ impl NixWorker {
             worker_id,
             operation_id,
             cas_store,
+            connection,
             action_info,
             runner_info,
         }
@@ -200,13 +205,11 @@ impl NixWorker {
     /// for completion.
     async fn execute_derivation(&self, drv_path: &StorePath<String>) -> Result<(), Error> {
         let drv_abs_path = drv_path.to_absolute_path();
-        let nix_store = self
-            .cas_store
-            .downcast_ref::<NixStore>(None)
-            .ok_or_else(|| make_err!(Code::Internal, "CAS store is not a NixStore"))?;
 
-        let build_results = nix_store
+        let build_results = self
+            .connection
             .build_derivation(&drv_abs_path)
+            .await
             .err_tip(|| format!("Building derivation {}", drv_abs_path))?;
 
         event!(
@@ -449,10 +452,7 @@ impl NixWorker {
             .collect();
 
         let path_info = self
-            .cas_store
-            .downcast_ref::<NixStore>(None)
-            .unwrap()
-            .as_pin()
+            .connection
             .add_to_store(
                 CAHash::Text([0; 32]).to_nix_nixbase32_string(),
                 &serialized_derivation,

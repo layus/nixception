@@ -1,5 +1,7 @@
 {
   description = "nativelink";
+  # NOTE: This flake uses git submodules. Build with:
+  #   nix build ".?submodules=1#<target>"
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

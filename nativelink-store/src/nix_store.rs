@@ -14,21 +14,18 @@
 
 use std::borrow::Cow;
 use std::marker::Send;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 
 use nativelink_config::stores::NixSpec;
 use nativelink_error::ResultExt;
 use nativelink_error::{Code, Error, make_err};
 use nativelink_metric::MetricsComponent;
-use nativelink_util::buf_channel::{
-    DropCloserReadHalf, DropCloserWriteHalf, make_buf_channel_pair,
-};
+use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::common::PackedHash;
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
@@ -39,22 +36,19 @@ use nix_compat::nixhash::NixHash;
 use nix_compat::store_path::StorePath;
 use nix_compat::store_path::build_ca_path;
 use nix_remote::StorePathSet;
-use nix_remote::ValidPathInfoWithPath;
-use nix_remote::worker_op::Resp;
-use nix_remote::worker_op::StreamingRecv;
-use nix_remote::worker_op::WorkerOp;
-use nix_remote::worker_op::{
-    AddToStore, BuildMode, BuildPaths, BuildResult, BuildStatus, Plain, QueryPathInfoResponse,
-    WithFramedSource,
-};
-use nix_remote::{DerivedPath, nix_client::NixDaemonClient, stderr::Msg};
 
 use tokio::io::AsyncReadExt;
+
+use crate::nix_daemon_connection::NixDaemonConnection;
 
 #[derive(MetricsComponent, Debug)]
 pub struct NixStore {
     #[metric(help = "The path of the daemon unix socket")]
     socket_path: String,
+
+    /// Shared connection handle to the Nix daemon.  All daemon
+    /// operations are routed through this object.
+    connection: Arc<NixDaemonConnection>,
 }
 
 impl NixStore {
@@ -64,7 +58,13 @@ impl NixStore {
             .clone()
             .or_else(|| Self::socket_path_from_env())
             .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string());
-        Ok(Arc::new(Self { socket_path }))
+
+        let connection = NixDaemonConnection::new(socket_path.clone());
+
+        Ok(Arc::new(Self {
+            socket_path,
+            connection,
+        }))
     }
 
     /// Try to derive the daemon socket path from the `NIX_REMOTE`
@@ -77,263 +77,13 @@ impl NixStore {
             .and_then(|val| val.strip_prefix("unix://").map(|path| path.to_string()))
     }
 
-    /// Connects to the nix daemon and creates a new client.
-    fn connect(&self) -> Result<NixDaemonClient<UnixStream, UnixStream>, Error> {
-        let read_socket = UnixStream::connect(self.socket_path.clone())
-            .err_tip(|| format!("While opening socket '{}'", self.socket_path))?;
-        let write_socket = read_socket
-            .try_clone()
-            .err_tip(|| "While cloning nix daemon socket")?;
-        NixDaemonClient::new(read_socket, write_socket)
-            .map_err(|e| make_err!(Code::Internal, "While creating a new NixClient: {}", e))
-    }
-
-    /// Queries the nix daemon for path info about the given store path.
+    /// Return a clone of the shared [`NixDaemonConnection`] handle.
     ///
-    /// Returns `Some(ValidPathInfo)` if the path is valid, `None` otherwise.
-    pub fn query_path_info(
-        &self,
-        store_path: &str,
-    ) -> Result<Option<nix_remote::worker_op::ValidPathInfo>, Error> {
-        let mut client = self.connect()?;
-
-        let response_type: Resp<QueryPathInfoResponse> = Default::default();
-        let query_op = &WorkerOp::QueryPathInfo(
-            Plain(nix_remote::StorePath(store_path.to_owned().into())),
-            response_type.clone(),
-        );
-
-        client
-            .send_worker_op_to_daemon(query_op)
-            .map_err(|e| make_err!(Code::Internal, "Sending QueryPathInfo op to daemon: {}", e))?;
-
-        debug_assert!(!query_op.requires_streaming());
-
-        // Read error messages from the daemon.
-        loop {
-            let error_message_from_builder = client
-                .read_error_msg()
-                .map_err(|e| make_err!(Code::Internal, "Reading error msg from daemon: {}", e))?;
-            if error_message_from_builder == Msg::Last(()) {
-                break;
-            }
-            dbg!(&error_message_from_builder);
-        }
-
-        // Get the final reply.
-        let reply = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
-
-        Ok(reply.path)
-    }
-
-    /// Internal method that handles the full upload-to-nix-daemon flow:
-    ///  1. Connect to the daemon
-    ///  2. Send the AddToStore operation
-    ///  3. Stream the data from the reader
-    ///  4. Read error messages and the final reply
-    ///
-    /// Returns the `ValidPathInfoWithPath` reply from the daemon.
-    async fn upload_to_nix_daemon(
-        &self,
-        name: &str,
-        cam_str: &str,
-        refs: StorePathSet,
-        mut reader: DropCloserReadHalf,
-        upload_size: usize,
-    ) -> Result<ValidPathInfoWithPath, Error> {
-        // Connect to the daemon socket.
-        let mut client = self.connect()?;
-
-        // Build and send the AddToStore operation.
-        let add_to_store_op = AddToStore {
-            name: nix_remote::StorePath(name.to_string().into()),
-            cam_str: nix_remote::StorePath(cam_str.to_owned().into()),
-            refs,
-            repair: false,
-        };
-        let response_type: Resp<ValidPathInfoWithPath> = Default::default();
-        let add_to_store_worker_op =
-            &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
-
-        let () = client
-            .send_worker_op_to_daemon(add_to_store_worker_op)
-            .map_err(|e| make_err!(Code::Internal, "Sending AddToStore op to daemon: {}", e))?;
-
-        debug_assert!(add_to_store_worker_op.requires_streaming());
-
-        // Stream the data to the daemon.
-        let mut remaining = upload_size;
-        while remaining > 0 {
-            let bytes = reader.recv().await.unwrap();
-            let chunk_len = bytes.len();
-            client.streaming_write_len(chunk_len as u64).unwrap();
-            client
-                .streaming_write_buff(bytes.as_ref(), chunk_len)
-                .unwrap();
-            remaining -= chunk_len;
-        }
-        // Signal end-of-stream and flush.
-        client.streaming_write_len(0).unwrap();
-        client.flush().unwrap();
-
-        // Read error messages from the daemon.
-        loop {
-            let error_message_from_builder = client.read_error_msg().unwrap();
-            if error_message_from_builder == Msg::Last(()) {
-                break;
-            }
-            dbg!(&error_message_from_builder);
-        }
-
-        // Get the final reply.
-        let reply = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
-
-        Ok(reply)
-    }
-
-    /// Builds a derivation by sending a `BuildPathsWithResults` operation to
-    /// the nix daemon and waiting for completion.
-    ///
-    /// `drv_path` is the absolute store path of the `.drv` file
-    /// (e.g. `/nix/store/...-reapi-action.drv`).
-    ///
-    /// Returns the list of `(DerivedPath, BuildResult)` pairs on success.
-    /// Returns an error if the daemon reports a build failure or a
-    /// communication error.
-    pub fn build_derivation(
-        &self,
-        drv_path: &str,
-    ) -> Result<Vec<(DerivedPath, BuildResult)>, Error> {
-        let mut client = self.connect()?;
-
-        // Format the derivation path as a DerivedPath requesting all outputs.
-        let derived_path = format!("{}!*", drv_path);
-
-        let build_paths = BuildPaths {
-            paths: vec![nix_remote::StorePath(derived_path.into())],
-            build_mode: BuildMode::Normal,
-        };
-
-        let response_type: Resp<Vec<(DerivedPath, BuildResult)>> = Default::default();
-        let build_op = &WorkerOp::BuildPathsWithResults(Plain(build_paths), response_type.clone());
-
-        client.send_worker_op_to_daemon(build_op).map_err(|e| {
-            make_err!(
-                Code::Internal,
-                "Sending BuildPathsWithResults op to daemon: {}",
-                e
-            )
-        })?;
-
-        debug_assert!(!build_op.requires_streaming());
-
-        // Read stderr messages from the daemon (build logs, activity
-        // updates, etc.) until we receive the final `Last(())` sentinel.
-        loop {
-            let msg = client.read_error_msg().map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Reading stderr msg from daemon during build: {}",
-                    e
-                )
-            })?;
-            match msg {
-                Msg::Last(()) => break,
-                Msg::Error(err) => {
-                    return Err(make_err!(
-                        Code::Internal,
-                        "Nix daemon reported error during build: {}",
-                        String::from_utf8_lossy(&err.message)
-                    ));
-                }
-                // Log other messages (build output, activity, etc.) but
-                // continue waiting for the final response.
-                _ => {
-                    tracing::debug!(stderr_msg = ?msg, "Nix daemon stderr during build");
-                }
-            }
-        }
-
-        // Read the final response.
-        let results: Vec<(DerivedPath, BuildResult)> = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Reading BuildPathsWithResults response: {}",
-                    e
-                )
-            })?;
-
-        // Check each result for failure.
-        for (path, result) in &results {
-            match result.status {
-                BuildStatus::Built
-                | BuildStatus::Substituted
-                | BuildStatus::AlreadyValid
-                | BuildStatus::ResolvesToAlreadyValid => {
-                    // Success cases — continue.
-                }
-                _ => {
-                    return Err(make_err!(
-                        Code::Internal,
-                        "Build of {:?} failed with status {:?}: {}",
-                        String::from_utf8_lossy(path.as_ref()),
-                        result.status,
-                        String::from_utf8_lossy(&result.error_msg.0)
-                    ));
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    pub async fn add_to_store(
-        self: Pin<&Self>,
-        digest: String,
-        content: &[u8],
-        name: &str,
-        inputs: &Vec<StorePath<String>>,
-    ) -> Result<ValidPathInfoWithPath, Error> {
-        let refs = StorePathSet {
-            paths: {
-                let mut paths: Vec<nix_remote::StorePath> = inputs
-                    .into_iter()
-                    .map(|sp| nix_remote::StorePath(sp.to_absolute_path().into()))
-                    .collect();
-                paths.sort();
-                paths
-            },
-        };
-
-        let (mut tx, rx) = make_buf_channel_pair();
-        tx.send(Bytes::copy_from_slice(content))
-            .await
-            .err_tip(|| "Failed to send buffer into channel")?;
-        tx.send_eof()
-            .err_tip(|| "Failed to send EOF into channel")?;
-
-        let reply = self
-            .upload_to_nix_daemon(name, &digest, refs, rx, content.len())
-            .await?;
-
-        // Write to nix store was successful, but we need to check that the
-        // content matches the digest in the key. We do not support arbitrary
-        // keys, only sh256 digests of the content.
-        // let () = (_reply.info.content_address.to_string().unwrap() == digest)
-        //     .then_some(())
-        //     .ok_or(make_err!(
-        //         Code::InvalidArgument,
-        //         "Key {:?} does not match the content.",
-        //         &digest
-        //     ))?;
-
-        Ok(reply)
+    /// Other components (e.g. the scheduler/worker) should obtain the
+    /// connection via this method and call its APIs directly, rather
+    /// than going through the store's `StoreDriver` trait.
+    pub fn connection(&self) -> Arc<NixDaemonConnection> {
+        Arc::clone(&self.connection)
     }
 }
 
@@ -411,6 +161,7 @@ impl StoreDriver for NixStore {
         let refs = StorePathSet { paths: vec![] };
 
         let reply = self
+            .connection
             .upload_to_nix_daemon("reapi-adapted", &nix_ca, refs, reader, total_size)
             .await?;
 

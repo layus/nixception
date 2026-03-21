@@ -22,6 +22,7 @@ use nativelink_util::store_trait::{StoreKey, StoreLike};
 use pretty_assertions::assert_eq;
 
 const SOCKET_PATH: &str = "/nix/var/nix/daemon-socket/socket";
+
 const VALID_HASH1: &str = "0123456789abcdef000000000000000000010000000000000123456789abcdef";
 // $ echo foo > reapi-adapted
 // $ sha256sum reapi-adapted #=> b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c
@@ -131,7 +132,8 @@ async fn query_path_info_found() -> Result<(), Error> {
         }),
     )
     .await?;
-    let result = store.query_path_info(BASH_STORE_PATH)?;
+    let connection = store.connection();
+    let result = connection.query_path_info(BASH_STORE_PATH).await?;
     assert!(
         result.is_some(),
         "Expected to find path info for bash, got None"

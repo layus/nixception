@@ -15,6 +15,8 @@
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
+use nativelink_store::nix_daemon_connection::NixDaemonConnection;
+
 use async_trait::async_trait;
 use futures::Future;
 use nativelink_config::schedulers::NixProxySpec;
@@ -85,6 +87,10 @@ pub struct NixScheduler<
     /// Runner metadata, computed once at startup.
     runner_info: Arc<RunnerInfo>,
 
+    /// Shared connection to the Nix daemon, passed to every spawned
+    /// [`NixWorker`].
+    nix_connection: Arc<NixDaemonConnection>,
+
     /// Weak self-reference so we can pass `Arc<dyn WorkerScheduler>` to
     /// spawned [`NixWorker`] instances from `&self`.
     self_ref: OnceLock<Weak<dyn WorkerScheduler>>,
@@ -116,6 +122,7 @@ impl<
         now_fn: NowFn,
         ac_store: Store,
         cas_store: Store,
+        nix_connection: Arc<NixDaemonConnection>,
         runner_info: Arc<RunnerInfo>,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         Self::new_with_callback(
@@ -126,6 +133,7 @@ impl<
             now_fn,
             ac_store,
             cas_store,
+            nix_connection,
             runner_info,
         )
     }
@@ -141,6 +149,7 @@ impl<
         now_fn: NowFn,
         ac_store: Store,
         cas_store: Store,
+        nix_connection: Arc<NixDaemonConnection>,
         runner_info: Arc<RunnerInfo>,
     ) -> (Arc<Self>, Arc<dyn WorkerScheduler>) {
         let platform_property_manager = Arc::new(PlatformPropertyManager::new(Default::default()));
@@ -160,6 +169,7 @@ impl<
             ac_store,
             cas_store,
             runner_info,
+            nix_connection,
             self_ref: OnceLock::new(),
         });
 
@@ -217,6 +227,7 @@ impl<
             worker_id,
             operation_id,
             self.cas_store.clone(),
+            self.nix_connection.clone(),
             action_info,
             self.runner_info.clone(),
         );
