@@ -28,7 +28,7 @@ use bstr::BString;
 use bytes::Bytes;
 use nativelink_error::{Code, Error, ResultExt, make_err};
 use nativelink_store::ac_utils::get_and_decode_digest;
-use nativelink_store::nix_daemon_connection::NixDaemonConnection;
+use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use nativelink_store::nix_store::key_to_store_path;
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, FileInfo, NameOrPath, OperationId, WorkerId,
@@ -66,8 +66,8 @@ pub(crate) struct NixWorker {
     operation_id: OperationId,
     /// CAS store used to fetch action inputs and upload derivations.
     cas_store: Store,
-    /// Shared connection to the Nix daemon.
-    connection: Arc<NixDaemonConnection>,
+    /// Connection pool to the Nix daemon.
+    connection: Arc<NixDaemonConnectionPool>,
     /// The action metadata describing what to execute.
     action_info: Arc<ActionInfo>,
     /// Runner metadata for constructing action derivations.
@@ -80,7 +80,7 @@ impl NixWorker {
         worker_id: WorkerId,
         operation_id: OperationId,
         cas_store: Store,
-        connection: Arc<NixDaemonConnection>,
+        connection: Arc<NixDaemonConnectionPool>,
         action_info: Arc<ActionInfo>,
         runner_info: Arc<RunnerInfo>,
     ) -> Self {

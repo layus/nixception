@@ -29,7 +29,7 @@ use nativelink_scheduler::runner_info::RunnerInfo;
 use nativelink_scheduler::worker::Worker;
 use nativelink_scheduler::worker_scheduler::WorkerScheduler;
 use nativelink_store::memory_store::MemoryStore;
-use nativelink_store::nix_daemon_connection::NixDaemonConnection;
+use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use nativelink_util::action_messages::{
     ActionInfo, ActionStage, ActionUniqueKey, ActionUniqueQualifier, INTERNAL_ERROR_EXIT_CODE,
     OperationId, WorkerId,
@@ -85,7 +85,7 @@ fn make_nix_scheduler() -> (
     );
     let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
     let cas_store = Store::new(MemoryStore::new(&MemorySpec::default()));
-    let nix_connection = NixDaemonConnection::new("/dev/null/fake-socket".to_string());
+    let nix_connection = NixDaemonConnectionPool::new_default("/dev/null/fake-socket".to_string());
     NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
@@ -118,7 +118,7 @@ async fn test_nix_scheduler_action_fails_with_empty_cas() -> Result<(), Error> {
 
     let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
     let cas_store = Store::new(MemoryStore::new(&MemorySpec::default()));
-    let nix_connection = NixDaemonConnection::new("/dev/null/fake-socket".to_string());
+    let nix_connection = NixDaemonConnectionPool::new_default("/dev/null/fake-socket".to_string());
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,
@@ -590,7 +590,7 @@ async fn test_nix_scheduler_empty_filter_results() -> Result<(), Error> {
     let ac_store = Store::new(MemoryStore::new(&MemorySpec::default()));
     let cas_store = Store::new(MemoryStore::new(&MemorySpec::default()));
 
-    let nix_connection = NixDaemonConnection::new("/dev/null/fake-socket".to_string());
+    let nix_connection = NixDaemonConnectionPool::new_default("/dev/null/fake-socket".to_string());
     let (scheduler, _worker_scheduler) = NixScheduler::new(
         &NixProxySpec::default(),
         awaited_action_db,

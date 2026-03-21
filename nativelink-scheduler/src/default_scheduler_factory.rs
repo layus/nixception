@@ -23,6 +23,7 @@ use nativelink_config::schedulers::{
 use nativelink_config::stores::EvictionPolicy;
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_proto::com::github::trace_machina::nativelink::events::OriginEvent;
+use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use nativelink_store::nix_store::NixStore;
 use nativelink_store::redis_store::RedisStore;
 use nativelink_store::store_manager::StoreManager;
@@ -179,16 +180,18 @@ fn nix_scheduler_factory(
     let cas_store = store_manager
         .get_store(&spec.cas_store)
         .err_tip(|| format!("'cas_store': '{}' does not exist", spec.cas_store))?;
-    let nix_connection = cas_store
+    let socket_path = cas_store
         .downcast_ref::<NixStore>(None)
         .ok_or_else(|| {
             make_err!(
                 Code::InvalidArgument,
-                "'cas_store' ('{}') is not a NixStore — cannot extract NixDaemonConnection",
+                "'cas_store' ('{}') is not a NixStore — cannot extract socket path",
                 spec.cas_store
             )
         })?
-        .connection();
+        .socket_path()
+        .to_string();
+    let nix_connection = NixDaemonConnectionPool::new_default(socket_path);
     let runner_info = Arc::new(
         RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
     );

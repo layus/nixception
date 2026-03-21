@@ -39,16 +39,16 @@ use nix_remote::StorePathSet;
 
 use tokio::io::AsyncReadExt;
 
-use crate::nix_daemon_connection::NixDaemonConnection;
+use crate::nix_daemon_connection::NixDaemonConnectionPool;
 
 #[derive(MetricsComponent, Debug)]
 pub struct NixStore {
     #[metric(help = "The path of the daemon unix socket")]
     socket_path: String,
 
-    /// Shared connection handle to the Nix daemon.  All daemon
-    /// operations are routed through this object.
-    connection: Arc<NixDaemonConnection>,
+    /// Connection pool to the Nix daemon.  All daemon operations are
+    /// routed through this object.
+    connection: Arc<NixDaemonConnectionPool>,
 }
 
 impl NixStore {
@@ -59,7 +59,7 @@ impl NixStore {
             .or_else(|| Self::socket_path_from_env())
             .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string());
 
-        let connection = NixDaemonConnection::new(socket_path.clone());
+        let connection = NixDaemonConnectionPool::new_default(socket_path.clone());
 
         Ok(Arc::new(Self {
             socket_path,
@@ -77,12 +77,20 @@ impl NixStore {
             .and_then(|val| val.strip_prefix("unix://").map(|path| path.to_string()))
     }
 
-    /// Return a clone of the shared [`NixDaemonConnection`] handle.
+    /// Return the socket path used by this store's connection pool.
     ///
-    /// Other components (e.g. the scheduler/worker) should obtain the
-    /// connection via this method and call its APIs directly, rather
-    /// than going through the store's `StoreDriver` trait.
-    pub fn connection(&self) -> Arc<NixDaemonConnection> {
+    /// Other components that need their own pool (e.g. the scheduler)
+    /// can use this to create a separate [`NixDaemonConnectionPool`]
+    /// pointing at the same daemon.
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
+    }
+
+    /// Return a clone of the store's [`NixDaemonConnectionPool`] handle.
+    ///
+    /// This is primarily useful for tests or components that want to
+    /// share the store's pool rather than creating their own.
+    pub fn connection(&self) -> Arc<NixDaemonConnectionPool> {
         Arc::clone(&self.connection)
     }
 }

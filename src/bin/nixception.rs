@@ -38,6 +38,7 @@ use nativelink_service::bytestream_server::ByteStreamServer;
 use nativelink_service::capabilities_server::CapabilitiesServer;
 use nativelink_service::cas_server::CasServer;
 use nativelink_service::execution_server::ExecutionServer;
+use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use nativelink_store::nix_store::NixStore;
 use nativelink_store::noop_store::NoopStore;
 use nativelink_store::store_manager::StoreManager;
@@ -79,8 +80,13 @@ async fn inner_main(
     let nix_store = NixStore::new(&NixSpec { socket_path: None })
         .await
         .err_tip(|| "Failed to create NIX_STORE")?;
-    let nix_connection = nix_store.connection();
+    let scheduler_socket_path = nix_store.socket_path().to_string();
     store_manager.add_store(NIX_STORE, Store::new(nix_store));
+
+    // Create a *separate* connection pool for the scheduler so that
+    // store operations and scheduler/worker operations each have their
+    // own pool of daemon connections.
+    let nix_connection = NixDaemonConnectionPool::new_default(scheduler_socket_path);
 
     // ── Runner info ────────────────────────────────────────────────────
     let runner_info = Arc::new(

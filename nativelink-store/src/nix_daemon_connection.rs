@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A shared, lazily-connected, idle-aware handle to the Nix daemon.
+//! A pool of lazily-connected, idle-aware connections to the Nix daemon.
 //!
-//! [`NixDaemonConnection`] wraps a single Unix-socket connection to the
-//! Nix daemon and serialises all operations through a
-//! [`tokio::sync::Mutex`].  The connection is established on first use
-//! and automatically closed after 30 seconds of inactivity.
+//! [`NixDaemonConnectionPool`] manages up to `max_connections` Unix-socket
+//! connections to the Nix daemon.  Concurrency is bounded by a
+//! [`tokio::sync::Semaphore`]; idle connections are cached in a
+//! [`tokio::sync::Mutex`]-protected `Vec` and reaped after 30 seconds of
+//! inactivity.
 //!
 //! This module is the only place that talks the nix-remote wire
 //! protocol — all `nix_remote::*` imports are confined here.
@@ -37,86 +38,123 @@ use nix_remote::worker_op::{
     Resp, StreamingRecv, WithFramedSource, WorkerOp,
 };
 use nix_remote::{DerivedPath, StorePathSet, ValidPathInfoWithPath};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
-/// How long the connection may sit idle before we close it.
+/// Default maximum number of pooled connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 10;
+
+/// How long a connection may sit idle before we close it.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the background reaper wakes up to check for idleness.
 const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 
 // -----------------------------------------------------------------------
-// Connection state
+// Internal types
 // -----------------------------------------------------------------------
 
-struct ConnectionState {
-    client: Option<NixDaemonClient<UnixStream, UnixStream>>,
+/// An idle connection together with the timestamp of its last use.
+struct IdleClient {
+    client: NixDaemonClient<UnixStream, UnixStream>,
     last_used: Instant,
+}
+
+/// A checked-out connection.  When the caller is done it should be
+/// returned to the pool via [`NixDaemonConnectionPool::release`].
+/// If an error occurred during use the connection should simply be
+/// dropped (not returned) to avoid reusing corrupted state.
+struct CheckedOutClient {
+    client: NixDaemonClient<UnixStream, UnixStream>,
 }
 
 // -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
 
-/// A shared handle to a single Nix daemon connection.
+/// A pool of connections to the Nix daemon.
 ///
-/// Created via [`NixDaemonConnection::new`], which returns an `Arc` and
-/// spawns a background task that closes the connection after
-/// [`IDLE_TIMEOUT`] of inactivity.
+/// Created via [`NixDaemonConnectionPool::new`], which returns an
+/// `Arc<Self>` and spawns a background reaper task.
 ///
-/// All public methods acquire an internal mutex, so concurrent callers
-/// are safely serialised.
-pub struct NixDaemonConnection {
+/// Each public method transparently acquires a connection from the pool
+/// (blocking if `max_connections` are already in use), performs the
+/// daemon operation, and returns the connection to the pool on success
+/// (or discards it on error so that a fresh connection is created next
+/// time).
+pub struct NixDaemonConnectionPool {
     socket_path: String,
-    state: Mutex<ConnectionState>,
+    /// Limits the total number of live connections (in-use + idle).
+    semaphore: Semaphore,
+    /// Idle, ready-to-use connections.
+    idle: Mutex<Vec<IdleClient>>,
 }
 
-impl std::fmt::Debug for NixDaemonConnection {
+impl std::fmt::Debug for NixDaemonConnectionPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NixDaemonConnection")
+        f.debug_struct("NixDaemonConnectionPool")
             .field("socket_path", &self.socket_path)
+            .field("max_connections", &self.semaphore.available_permits())
             .finish_non_exhaustive()
     }
 }
 
-impl NixDaemonConnection {
-    /// Create a new connection handle and spawn the idle-reaper task.
+impl NixDaemonConnectionPool {
+    /// Create a new connection pool and spawn the idle-reaper task.
     ///
-    /// The actual Unix-socket connection is **not** opened until the
-    /// first API call.
-    pub fn new(socket_path: String) -> Arc<Self> {
-        let conn = Arc::new(Self {
+    /// No connections are opened until the first API call.
+    pub fn new(socket_path: String, max_connections: usize) -> Arc<Self> {
+        let pool = Arc::new(Self {
             socket_path,
-            state: Mutex::new(ConnectionState {
-                client: None,
-                last_used: Instant::now(),
-            }),
+            semaphore: Semaphore::new(max_connections),
+            idle: Mutex::new(Vec::with_capacity(max_connections)),
         });
 
         // Spawn a lightweight background task that drops idle
         // connections.  It holds only a `Weak` reference so it will
         // stop automatically when the last `Arc` is dropped.
-        let weak: Weak<Self> = Arc::downgrade(&conn);
+        let weak: Weak<Self> = Arc::downgrade(&pool);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(REAPER_INTERVAL).await;
-                let Some(conn) = weak.upgrade() else {
-                    // The connection object has been dropped — exit.
+                let Some(pool) = weak.upgrade() else {
                     break;
                 };
-                let mut state = conn.state.lock().await;
-                if state.client.is_some() && state.last_used.elapsed() >= IDLE_TIMEOUT {
+                let mut idle = pool.idle.lock().await;
+                let before = idle.len();
+                idle.retain(|entry| entry.last_used.elapsed() < IDLE_TIMEOUT);
+                let removed = before - idle.len();
+                if removed > 0 {
+                    // NOTE: We do NOT call `add_permits` here.  The
+                    // semaphore tracks *concurrent operations*, not
+                    // live connections.  By the time a connection is
+                    // sitting in the idle vec, the semaphore permit
+                    // that was used during the operation has already
+                    // been returned (when the caller's `_permit`
+                    // went out of scope).  So removing idle
+                    // connections is purely a resource-cleanup action
+                    // — no permit bookkeeping required.
                     tracing::debug!(
-                        socket_path = %conn.socket_path,
-                        "Closing idle Nix daemon connection"
+                        socket_path = %pool.socket_path,
+                        removed,
+                        remaining = idle.len(),
+                        "Reaped idle Nix daemon connections"
                     );
-                    state.client = None;
                 }
             }
         });
 
-        conn
+        pool
+    }
+
+    /// Convenience constructor using [`DEFAULT_MAX_CONNECTIONS`].
+    pub fn new_default(socket_path: String) -> Arc<Self> {
+        Self::new(socket_path, DEFAULT_MAX_CONNECTIONS)
+    }
+
+    /// Return the socket path this pool connects to.
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
     }
 
     // -------------------------------------------------------------------
@@ -131,38 +169,51 @@ impl NixDaemonConnection {
         &self,
         store_path: &str,
     ) -> Result<Option<nix_remote::worker_op::ValidPathInfo>, Error> {
-        let mut state = self.state.lock().await;
-        let client = Self::get_or_connect(&self.socket_path, &mut state)?;
+        let (_permit, mut conn) = self.acquire().await?;
 
-        let response_type: Resp<QueryPathInfoResponse> = Default::default();
-        let query_op = &WorkerOp::QueryPathInfo(
-            Plain(nix_remote::StorePath(store_path.to_owned().into())),
-            response_type.clone(),
-        );
+        let result = (|| -> Result<Option<nix_remote::worker_op::ValidPathInfo>, Error> {
+            let client = &mut conn.client;
 
-        client
-            .send_worker_op_to_daemon(query_op)
-            .map_err(|e| make_err!(Code::Internal, "Sending QueryPathInfo op to daemon: {}", e))?;
+            let response_type: Resp<QueryPathInfoResponse> = Default::default();
+            let query_op = &WorkerOp::QueryPathInfo(
+                Plain(nix_remote::StorePath(store_path.to_owned().into())),
+                response_type.clone(),
+            );
 
-        debug_assert!(!query_op.requires_streaming());
+            client.send_worker_op_to_daemon(query_op).map_err(|e| {
+                make_err!(Code::Internal, "Sending QueryPathInfo op to daemon: {}", e)
+            })?;
 
-        // Read error messages from the daemon.
-        loop {
-            let msg = client
-                .read_error_msg()
-                .map_err(|e| make_err!(Code::Internal, "Reading error msg from daemon: {}", e))?;
-            if msg == Msg::Last(()) {
-                break;
+            debug_assert!(!query_op.requires_streaming());
+
+            loop {
+                let msg = client.read_error_msg().map_err(|e| {
+                    make_err!(Code::Internal, "Reading error msg from daemon: {}", e)
+                })?;
+                if msg == Msg::Last(()) {
+                    break;
+                }
+                tracing::debug!(?msg, "Nix daemon stderr during query_path_info");
             }
-            tracing::debug!(?msg, "Nix daemon stderr during query_path_info");
+
+            let reply = client
+                .read_build_response_from_daemon(&response_type)
+                .map_err(|e| make_err!(Code::Internal, "{}", e))?;
+
+            Ok(reply.path)
+        })();
+
+        match result {
+            Ok(val) => {
+                self.release(conn).await;
+                Ok(val)
+            }
+            Err(e) => {
+                // Drop the connection — it may be in a bad state.
+                // The semaphore permit is released when `_permit` drops.
+                Err(e)
+            }
         }
-
-        let reply = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
-
-        state.last_used = Instant::now();
-        Ok(reply.path)
     }
 
     /// Upload data to the Nix daemon via the `AddToStore` operation.
@@ -177,71 +228,80 @@ impl NixDaemonConnection {
         mut reader: DropCloserReadHalf,
         upload_size: usize,
     ) -> Result<ValidPathInfoWithPath, Error> {
-        let mut state = self.state.lock().await;
-        let client = Self::get_or_connect(&self.socket_path, &mut state)?;
+        let (_permit, mut conn) = self.acquire().await?;
 
-        // Build and send the AddToStore operation.
-        let add_to_store_op = AddToStore {
-            name: nix_remote::StorePath(name.to_string().into()),
-            cam_str: nix_remote::StorePath(cam_str.to_owned().into()),
-            refs,
-            repair: false,
-        };
-        let response_type: Resp<ValidPathInfoWithPath> = Default::default();
-        let worker_op =
-            &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
+        let result = (|| async {
+            let client = &mut conn.client;
 
-        client
-            .send_worker_op_to_daemon(worker_op)
-            .map_err(|e| make_err!(Code::Internal, "Sending AddToStore op to daemon: {}", e))?;
+            let add_to_store_op = AddToStore {
+                name: nix_remote::StorePath(name.to_string().into()),
+                cam_str: nix_remote::StorePath(cam_str.to_owned().into()),
+                refs,
+                repair: false,
+            };
+            let response_type: Resp<ValidPathInfoWithPath> = Default::default();
+            let worker_op =
+                &WorkerOp::AddToStore(WithFramedSource(add_to_store_op), response_type.clone());
 
-        debug_assert!(worker_op.requires_streaming());
-
-        // Stream the data to the daemon.
-        let mut remaining = upload_size;
-        while remaining > 0 {
-            let bytes = reader
-                .recv()
-                .await
-                .err_tip(|| "Reading from channel during upload_to_nix_daemon")?;
-            let chunk_len = bytes.len();
             client
-                .streaming_write_len(chunk_len as u64)
-                .map_err(|e| make_err!(Code::Internal, "Writing chunk length to daemon: {}", e))?;
-            client
-                .streaming_write_buff(bytes.as_ref(), chunk_len)
-                .map_err(|e| make_err!(Code::Internal, "Writing chunk data to daemon: {}", e))?;
-            remaining -= chunk_len;
-        }
-        // Signal end-of-stream and flush.
-        client
-            .streaming_write_len(0)
-            .map_err(|e| make_err!(Code::Internal, "Writing end-of-stream to daemon: {}", e))?;
-        client
-            .flush()
-            .map_err(|e| make_err!(Code::Internal, "Flushing daemon connection: {}", e))?;
+                .send_worker_op_to_daemon(worker_op)
+                .map_err(|e| make_err!(Code::Internal, "Sending AddToStore op to daemon: {}", e))?;
 
-        // Read error messages from the daemon.
-        loop {
-            let msg = client.read_error_msg().map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Reading error msg from daemon during upload: {}",
-                    e
-                )
-            })?;
-            if msg == Msg::Last(()) {
-                break;
+            debug_assert!(worker_op.requires_streaming());
+
+            let mut remaining = upload_size;
+            while remaining > 0 {
+                let bytes = reader
+                    .recv()
+                    .await
+                    .err_tip(|| "Reading from channel during upload_to_nix_daemon")?;
+                let chunk_len = bytes.len();
+                client.streaming_write_len(chunk_len as u64).map_err(|e| {
+                    make_err!(Code::Internal, "Writing chunk length to daemon: {}", e)
+                })?;
+                client
+                    .streaming_write_buff(bytes.as_ref(), chunk_len)
+                    .map_err(|e| {
+                        make_err!(Code::Internal, "Writing chunk data to daemon: {}", e)
+                    })?;
+                remaining -= chunk_len;
             }
-            tracing::debug!(?msg, "Nix daemon stderr during upload");
+            client
+                .streaming_write_len(0)
+                .map_err(|e| make_err!(Code::Internal, "Writing end-of-stream to daemon: {}", e))?;
+            client
+                .flush()
+                .map_err(|e| make_err!(Code::Internal, "Flushing daemon connection: {}", e))?;
+
+            loop {
+                let msg = client.read_error_msg().map_err(|e| {
+                    make_err!(
+                        Code::Internal,
+                        "Reading error msg from daemon during upload: {}",
+                        e
+                    )
+                })?;
+                if msg == Msg::Last(()) {
+                    break;
+                }
+                tracing::debug!(?msg, "Nix daemon stderr during upload");
+            }
+
+            let reply = client
+                .read_build_response_from_daemon(&response_type)
+                .map_err(|e| make_err!(Code::Internal, "{}", e))?;
+
+            Ok(reply)
+        })()
+        .await;
+
+        match result {
+            Ok(val) => {
+                self.release(conn).await;
+                Ok(val)
+            }
+            Err(e) => Err(e),
         }
-
-        let reply = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| make_err!(Code::Internal, "{}", e))?;
-
-        state.last_used = Instant::now();
-        Ok(reply)
     }
 
     /// Build a derivation by sending a `BuildPathsWithResults` operation
@@ -253,89 +313,93 @@ impl NixDaemonConnection {
         &self,
         drv_path: &str,
     ) -> Result<Vec<(DerivedPath, BuildResult)>, Error> {
-        let mut state = self.state.lock().await;
-        let client = Self::get_or_connect(&self.socket_path, &mut state)?;
+        let (_permit, mut conn) = self.acquire().await?;
 
-        // Format the derivation path as a DerivedPath requesting all outputs.
-        let derived_path = format!("{}!*", drv_path);
+        let result = (|| -> Result<Vec<(DerivedPath, BuildResult)>, Error> {
+            let client = &mut conn.client;
 
-        let build_paths = BuildPaths {
-            paths: vec![nix_remote::StorePath(derived_path.into())],
-            build_mode: BuildMode::Normal,
-        };
+            let derived_path = format!("{}!*", drv_path);
 
-        let response_type: Resp<Vec<(DerivedPath, BuildResult)>> = Default::default();
-        let build_op = &WorkerOp::BuildPathsWithResults(Plain(build_paths), response_type.clone());
+            let build_paths = BuildPaths {
+                paths: vec![nix_remote::StorePath(derived_path.into())],
+                build_mode: BuildMode::Normal,
+            };
 
-        client.send_worker_op_to_daemon(build_op).map_err(|e| {
-            make_err!(
-                Code::Internal,
-                "Sending BuildPathsWithResults op to daemon: {}",
-                e
-            )
-        })?;
+            let response_type: Resp<Vec<(DerivedPath, BuildResult)>> = Default::default();
+            let build_op =
+                &WorkerOp::BuildPathsWithResults(Plain(build_paths), response_type.clone());
 
-        debug_assert!(!build_op.requires_streaming());
-
-        // Read stderr messages from the daemon until we receive the
-        // final `Last(())` sentinel.
-        loop {
-            let msg = client.read_error_msg().map_err(|e| {
+            client.send_worker_op_to_daemon(build_op).map_err(|e| {
                 make_err!(
                     Code::Internal,
-                    "Reading stderr msg from daemon during build: {}",
-                    e
-                )
-            })?;
-            match msg {
-                Msg::Last(()) => break,
-                Msg::Error(err) => {
-                    return Err(make_err!(
-                        Code::Internal,
-                        "Nix daemon reported error during build: {}",
-                        String::from_utf8_lossy(&err.message)
-                    ));
-                }
-                _ => {
-                    tracing::debug!(stderr_msg = ?msg, "Nix daemon stderr during build");
-                }
-            }
-        }
-
-        // Read the final response.
-        let results: Vec<(DerivedPath, BuildResult)> = client
-            .read_build_response_from_daemon(&response_type)
-            .map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Reading BuildPathsWithResults response: {}",
+                    "Sending BuildPathsWithResults op to daemon: {}",
                     e
                 )
             })?;
 
-        // Check each result for failure.
-        for (path, result) in &results {
-            match result.status {
-                BuildStatus::Built
-                | BuildStatus::Substituted
-                | BuildStatus::AlreadyValid
-                | BuildStatus::ResolvesToAlreadyValid => {
-                    // Success — continue.
-                }
-                _ => {
-                    return Err(make_err!(
+            debug_assert!(!build_op.requires_streaming());
+
+            loop {
+                let msg = client.read_error_msg().map_err(|e| {
+                    make_err!(
                         Code::Internal,
-                        "Build of {:?} failed with status {:?}: {}",
-                        String::from_utf8_lossy(path.as_ref()),
-                        result.status,
-                        String::from_utf8_lossy(&result.error_msg.0)
-                    ));
+                        "Reading stderr msg from daemon during build: {}",
+                        e
+                    )
+                })?;
+                match msg {
+                    Msg::Last(()) => break,
+                    Msg::Error(err) => {
+                        return Err(make_err!(
+                            Code::Internal,
+                            "Nix daemon reported error during build: {}",
+                            String::from_utf8_lossy(&err.message)
+                        ));
+                    }
+                    _ => {
+                        tracing::debug!(stderr_msg = ?msg, "Nix daemon stderr during build");
+                    }
                 }
             }
-        }
 
-        state.last_used = Instant::now();
-        Ok(results)
+            let results: Vec<(DerivedPath, BuildResult)> = client
+                .read_build_response_from_daemon(&response_type)
+                .map_err(|e| {
+                    make_err!(
+                        Code::Internal,
+                        "Reading BuildPathsWithResults response: {}",
+                        e
+                    )
+                })?;
+
+            for (path, result) in &results {
+                match result.status {
+                    BuildStatus::Built
+                    | BuildStatus::Substituted
+                    | BuildStatus::AlreadyValid
+                    | BuildStatus::ResolvesToAlreadyValid => {}
+                    _ => {
+                        return Err(make_err!(
+                            Code::Internal,
+                            "Build of {:?} failed with status {:?}: {}",
+                            String::from_utf8_lossy(path.as_ref()),
+                            result.status,
+                            String::from_utf8_lossy(&result.error_msg.0)
+                        ));
+                    }
+                }
+            }
+
+            Ok(results)
+        })();
+
+        match result {
+            Ok(val) => {
+                self.release(conn).await;
+                Ok(val)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Upload an item to the Nix store with explicit content, name, and
@@ -376,20 +440,62 @@ impl NixDaemonConnection {
     // Internal helpers
     // -------------------------------------------------------------------
 
-    /// Return the existing client or open a new connection to the daemon.
+    /// Acquire a connection from the pool.
     ///
-    /// Must be called while the `Mutex` is held (the caller passes the
-    /// locked state).
-    fn get_or_connect<'a>(
-        socket_path: &str,
-        state: &'a mut ConnectionState,
-    ) -> Result<&'a mut NixDaemonClient<UnixStream, UnixStream>, Error> {
-        if state.client.is_none() {
-            tracing::debug!(%socket_path, "Opening new Nix daemon connection");
-            state.client = Some(Self::connect(socket_path)?);
-        }
-        // SAFETY: we just ensured `client` is `Some`.
-        Ok(state.client.as_mut().unwrap())
+    /// Waits for a semaphore permit (which bounds the total number of
+    /// live connections), then either reuses an idle connection or
+    /// opens a new one.
+    ///
+    /// The returned [`SemaphorePermit`] **must** be kept alive until the
+    /// caller is done with the connection.  Dropping the permit signals
+    /// that the connection slot is free (whether the connection was
+    /// returned to the pool or discarded).
+    async fn acquire(&self) -> Result<(SemaphorePermit<'_>, CheckedOutClient), Error> {
+        let permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| make_err!(Code::Internal, "Connection pool semaphore closed"))?;
+
+        let mut idle = self.idle.lock().await;
+        let client = if let Some(entry) = idle.pop() {
+            tracing::trace!(
+                socket_path = %self.socket_path,
+                idle_remaining = idle.len(),
+                "Reusing idle Nix daemon connection"
+            );
+            entry.client
+        } else {
+            drop(idle); // Release the lock before doing IO.
+            tracing::debug!(
+                socket_path = %self.socket_path,
+                "Opening new Nix daemon connection"
+            );
+            Self::connect(&self.socket_path)?
+        };
+
+        Ok((permit, CheckedOutClient { client }))
+    }
+
+    /// Return a connection to the idle pool after successful use.
+    ///
+    /// The semaphore permit (held by the caller via `_permit`) is
+    /// released when it goes out of scope — which happens immediately
+    /// after this method returns.  The flow is:
+    ///
+    ///   1. `acquire()` → takes permit, pops/creates connection
+    ///   2. caller uses the connection
+    ///   3. `release()` → pushes connection back to idle vec
+    ///   4. `_permit` drops → permit returned to semaphore
+    ///
+    /// Because the semaphore tracks concurrent *operations* (not live
+    /// connections), idle connections in the vec do not consume permits.
+    async fn release(&self, conn: CheckedOutClient) {
+        let mut idle = self.idle.lock().await;
+        idle.push(IdleClient {
+            client: conn.client,
+            last_used: Instant::now(),
+        });
     }
 
     /// Open a fresh Unix-socket connection to the Nix daemon and perform
