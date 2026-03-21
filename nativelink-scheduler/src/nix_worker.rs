@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::iter::once;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +36,7 @@ use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasher;
 use nativelink_util::operation_state_manager::UpdateOperationType;
 use nativelink_util::store_trait::{Store, StoreKey, StoreLike};
+use serde_json::json;
 use tokio::time;
 use tracing::{Level, event};
 
@@ -301,98 +301,44 @@ impl NixWorker {
         .await
         .err_tip(|| "Converting digest to Directory")?;
 
-        let script = entries
-            .iter()
-            .map(|e| {
-                format!(
-                    concat!(
-                        "mkdir -p $(dirname {path})\n",
-                        // "ln {store_path} {path} || ",
-                        "cp {store_path} {path} --no-preserve=all",
-                    ),
-                    path = e.path.to_string_lossy(),
-                    store_path = e.store_path.to_absolute_path()
-                )
-            })
-            .chain(once(format!("tree"))) // for debugging: print the input tree
-            // From now on, we only deal with outputs, and these are relative to
-            // the working directory, so `cd` into it first.
-            .chain(once(format!(
-                "mkdir -p {cwd} && cd {cwd}",
-                cwd = command.working_directory
-            )))
-            // Create output directory structure before running the command
-            // so that stdout/stderr redirections have a target.
-            .chain(
-                command
-                    .output_directories
-                    .clone()
-                    .into_iter()
-                    .map(|dir| format!("mkdir -p {dir}")),
-            )
-            .chain(
-                command
-                    .output_files
-                    .clone()
-                    .into_iter()
-                    .map(|file| format!("mkdir -p $(dirname {file})")),
-            )
-            .chain(
-                command
-                    .output_paths
-                    .clone()
-                    .into_iter()
-                    .map(|path| format!("mkdir -p $(dirname {path})")),
-            )
-            // Create $out for stdout, stderr and exitcode.
-            // Prepare $out/outputs for the actual outputs extracted later.
-            .chain(once("mkdir -p $out/outputs".into()))
-            .chain(once(format!("("))) // Start a subshell so that `export` commands do not affect the rest of the script (`tree` in particular).
-            .chain(command.environment_variables.into_iter().map(|var| {
-                format!(
-                    "export {name}='{value}'",
-                    name = var.name,
-                    value = var.value
-                )
-            }))
-            // Run the actual command, capturing stdout and stderr.
-            .chain(once(format!(
-                concat!(
-                    "{cmd} >$out/stdout 2>$out/stderr\n",
-                    "echo $? >$out/exitcode",
-                ),
-                cmd = command.arguments.join(" "),
-            )))
-            .chain(once(format!(")"))) // End of subshell.
-            .chain(once(format!("tree"))) // for debugging: print the output tree after execution
-            // Copy outputs into $out/outputs/. Use || true so that
-            // missing outputs do not cause the nix build to fail — the
-            // real exit code is already saved in $out/exitcode.
-            .chain(
-                command
-                    .output_directories
-                    .into_iter()
-                    .map(|dir| format!("cp --parents -r {dir} $out/outputs || true")),
-            )
-            .chain(
-                command
-                    .output_files
-                    .into_iter()
-                    .map(|file| format!("cp --parents {file} $out/outputs || true")),
-            )
-            .chain(
-                command
-                    .output_paths
-                    .into_iter()
-                    .map(|path| format!("cp --parents {path} $out/outputs || true")),
-            )
-            .chain(once(format!("tree $out"))) // for debugging: print the final output tree
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Build a JSON manifest describing the action for the C++ runner.
+        // The manifest is passed to the builder via Nix's passAsFile
+        // mechanism: the derivation environment contains
+        //   passAsFile = "manifest"
+        //   manifest   = <JSON>
+        // and the Nix daemon writes the JSON to a temporary file, setting
+        // $manifestPath in the builder's environment.
+        let manifest = json!({
+            "inputs": entries.iter().map(|e| {
+                json!({
+                    "store_path": e.store_path.to_absolute_path(),
+                    "path": e.path.to_string_lossy(),
+                })
+            }).collect::<Vec<_>>(),
+            "working_directory": command.working_directory,
+            "output_directories": command.output_directories,
+            "output_files": command.output_files,
+            "output_paths": command.output_paths,
+            "environment": command.environment_variables.into_iter()
+                .map(|var| (var.name, serde_json::Value::String(var.value)))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
+            "command": command.arguments,
+        });
+
+        let manifest_str = manifest.to_string();
 
         let outputs = BTreeMap::from([("out".to_string(), Output::default())]);
+
+        // The derivation environment uses passAsFile so that the (potentially
+        // large) manifest is written to a file by the Nix daemon rather than
+        // passed as an environment variable.  The C++ runner reads
+        // $manifestPath at startup.
         let environment = BTreeMap::from([
-            ("script".into(), BString::new(script.as_bytes().to_vec())),
+            (
+                "manifest".into(),
+                BString::new(manifest_str.as_bytes().to_vec()),
+            ),
+            ("passAsFile".into(), BString::from("manifest")),
             ("out".into(), BString::default()),
         ]);
 
@@ -404,7 +350,8 @@ impl NixWorker {
         let builder_deriver = ri.drv_store_path.clone();
 
         let mut derivation: Derivation = Derivation {
-            arguments: vec!["set -x; eval \"$script\"".into()],
+            // No arguments needed — the C++ runner reads $manifestPath.
+            arguments: vec![],
             builder: ri.builder_path.clone().into(),
             environment,
             input_derivations: BTreeMap::from([(builder_deriver, BTreeSet::from(["out".into()]))]),
