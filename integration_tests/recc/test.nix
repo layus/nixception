@@ -5,6 +5,14 @@
 # to that socket (its NixStore backend) and serves the Remote Execution API,
 # while recc acts as a client that submits a small C++ compilation.
 #
+# CC and CXX are exported in preConfigure so they take effect after stdenv's
+# cc-wrapper setup hook (which unconditionally sets CC=gcc / CXX=g++).  The
+# multi-word value "recc g++" follows the same pattern as "ccache g++": the
+# shell word-splits it so recc is invoked with g++ as its first argument.
+# The Makefile uses ?= for CC so the environment variable takes precedence.
+# CXX is derived from CC by the Makefile when not explicitly set, but we set
+# both for clarity.
+#
 # Requirements (nix.conf / NixOS config):
 #   experimental-features = nix-command recursive-nix
 #   system-features       = recursive-nix
@@ -37,13 +45,6 @@
     esac
     exec ${gcc}/bin/g++ "$@"
   '';
-
-  # Wrap `recc <compiler>` in a single-word script so make doesn't choke on
-  # the space in a two-word CC/CXX value.  The full store path to gppSleeper's
-  # g++ is passed so the exact wrapper binary is used both locally and remotely.
-  reccGpp = writeShellScriptBin "recc-gpp" ''
-    exec ${buildbox}/bin/recc ${gppSleeper}/bin/g++ "$@"
-  '';
 in
   stdenv.mkDerivation {
     name = "recc-recursive-nix-test";
@@ -66,12 +67,23 @@ in
     # Lets stdenv pass -j${NIX_BUILD_CORES} to make automatically.
     enableParallelBuilding = true;
 
-    # ── make variable assignments ────────────────────────────────────────
-    # Equivalent to cmakeFlags for cmake-based builds.  Passed as arguments
-    # to every make invocation (build, check, install).
+    # ── compiler override ────────────────────────────────────────────────
+    # stdenv's cc-wrapper setup hook unconditionally exports CC=gcc / CXX=g++,
+    # so we must re-export after it.  preConfigure runs inside configurePhase,
+    # after all setup hooks have been sourced.  The multi-word value causes
+    # the shell to run `recc g++ …` — the same pattern as `ccache g++`.
+    # The Makefile uses ?= for CC/CXX so these environment variables take
+    # precedence over the defaults.
+    preConfigure = ''
+      export CC="${buildbox}/bin/recc ${gppSleeper}/bin/g++"
+      export CXX="${buildbox}/bin/recc ${gppSleeper}/bin/g++"
+    '';
+
+    # ── preprocessor flags ───────────────────────────────────────────────
+    # CPPFLAGS is not touched by any setup hook, so makeFlags is fine here.
+    # make command-line variables override Makefile definitions, ensuring
+    # the -D flag reaches every compilation unit.
     makeFlags = [
-      "CC=${reccGpp}/bin/recc-gpp"
-      "CXX=${reccGpp}/bin/recc-gpp"
       "CPPFLAGS=-DBUILD_CONSTANT=42"
     ];
 

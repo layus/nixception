@@ -7,12 +7,17 @@
 #
 # It registers one extra phase:
 #
-#   nixceptionStartPhase  – registered via preBuildPhases; starts the nixception
-#                           server and waits until it is ready to accept
-#                           connections on 127.0.0.1:50051.  The server is
-#                           stopped by hooking into stdenv's failureHook and
+#   nixceptionStartPhase  – registered via preConfigurePhases; starts the
+#                           nixception server and waits until it is ready to
+#                           accept connections on 127.0.0.1:50051.  The server
+#                           is stopped by hooking into stdenv's failureHook and
 #                           exitHook, which are called by exitHandler (the EXIT
 #                           trap) on failure and success respectively.
+#
+# The phase is registered before configurePhase (rather than before buildPhase)
+# because some build systems (e.g. CMake) probe the compiler during configure.
+# When the compiler is wrapped by recc, the nixception server must already be
+# listening or those probes will fail with connection-refused errors.
 #
 # ── Shutdown ──────────────────────────────────────────────────────────────────
 #
@@ -86,4 +91,4 @@ nixceptionStartPhase() {
     echo "nixception-hook: server is ready (pid $_pid)"
 }
 
-preBuildPhases="${preBuildPhases:-} nixceptionStartPhase"
+preConfigurePhases="${preConfigurePhases:-} nixceptionStartPhase"
