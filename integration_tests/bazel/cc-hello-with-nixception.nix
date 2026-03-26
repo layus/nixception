@@ -1,6 +1,6 @@
 # integration_tests/bazel/cc-hello-with-nixception.nix
 #
-# Integration test: build a minimal C++ project via Bazel + nixception.
+# Integration test: build a minimal C++ project via Bazel 8 + nixception.
 #
 # This test exercises the full REAPI round-trip:
 #   Bazel → gRPC → nixception → recursive-nix daemon → nix build
@@ -10,22 +10,28 @@
 # to nixception via --remote_executor, which in turn creates nix derivations
 # for each action and builds them through the recursive-nix daemon socket.
 #
+# Dependency fetching
+# ───────────────────
+# Rather than manually declaring fetchurl for each implicit Bazel dependency,
+# we follow the pattern from nixpkgs' pkgs/by-name/ba/bazel_8/build-support/:
+#
+#   1. Pin a snapshot of the Bazel Central Registry (BCR) via fetchFromGitHub.
+#   2. Create a fixed-output derivation (FOD) that runs `bazel fetch` with
+#      network access, populating a --repository_cache.
+#   3. In the actual (sandboxed) build, symlink the repo cache so Bazel
+#      resolves all modules offline.
+#
+# The project uses MODULE.bazel (bzlmod) — no WORKSPACE file needed.
+#
 # Build flow
 # ──────────
-#   1. unpackPhase           – copy the minimal Bazel project into $TMPDIR
-#   2. nixceptionStartPhase  – (preConfigurePhase) server comes UP
-#   3. configurePhase        – (no-op, but the hook runs before it)
-#   4. buildPhase            – bazel build //src:hello-world via remote exec
-#   5. installPhase          – copy binary to $out, verify it runs
-#   6. exitHook/failureHook  – server comes DOWN
-#
-# The Bazel project lives in integration_tests/bazel/project/ and uses
-# WORKSPACE mode with an empty WORKSPACE file, so no *user-declared* external
-# dependencies are needed.  However, Bazel 7's DEFAULT.WORKSPACE.SUFFIX still
-# implicitly pulls in bazel_skylib, rules_cc, and rules_python for its built-in
-# toolchain resolution.  Since the Nix build sandbox blocks network access, we
-# pre-fetch those archives via fetchurl and populate Bazel's --repository_cache
-# so it finds them offline.
+#   1. [FOD]  bazelRepoCache   – fetch external deps into repository_cache
+#   2. unpackPhase              – copy the minimal Bazel project into $TMPDIR
+#   3. nixceptionStartPhase     – (preConfigurePhase) server comes UP
+#   4. configurePhase           – (no-op, but the hook runs before it)
+#   5. buildPhase               – bazel build //src:hello-world via remote exec
+#   6. installPhase             – copy binary to $out, verify it runs
+#   7. exitHook/failureHook     – server comes DOWN
 #
 # Requirements (nix.conf / NixOS config):
 #   experimental-features = nix-command recursive-nix
@@ -42,27 +48,63 @@
   nixceptionHook,
   gcc,
   stdenv,
-  bazel_7,
-  fetchurl,
+  bazel_8,
+  fetchFromGitHub,
+  lndir,
   lib,
 }: let
-  # ── Pre-fetched Bazel implicit dependencies ──────────────────────────────
-  # Bazel 7's DEFAULT.WORKSPACE.SUFFIX declares http_archive rules for these
-  # three repos.  They are fetched during the analysis phase (before any build
-  # actions) and there is no flag to disable them.  We pre-fetch the exact
-  # archives Bazel expects and populate its --repository_cache so it can
-  # resolve them without network access.
-  bazelSkylib = fetchurl {
-    url = "https://github.com/bazelbuild/bazel-skylib/releases/download/1.6.1/bazel-skylib-1.6.1.tar.gz";
-    hash = "sha256-nziIakBUjG6WwQa3UvJCEw7hGqoGila6flb0UR8z5PI=";
+  # ── Bazel Central Registry snapshot ────────────────────────────────────
+  # Pin a specific BCR revision so module resolution is fully reproducible.
+  # This same rev is used by the bazel_8 examples in nixpkgs.
+  registry = fetchFromGitHub {
+    owner = "bazelbuild";
+    repo = "bazel-central-registry";
+    rev = "722299976c97e5191045c8016b7c8532189fc3f6";
+    hash = "sha256-hi5BKI94am2LCXD93GBeT0gsODxGeSsd0OrhTwpNAgM=";
   };
-  rulesCC = fetchurl {
-    url = "https://github.com/bazelbuild/rules_cc/releases/download/0.0.9/rules_cc-0.0.9.tar.gz";
-    hash = "sha256-IDeHW5pEVtzkp50RKorohbvEqtlo5lh9ym5k86CQDN8=";
-  };
-  rulesPython = fetchurl {
-    url = "https://github.com/bazelbuild/rules_python/releases/download/0.24.0/rules_python-0.24.0.tar.gz";
-    hash = "sha256-CoADsEQpTXhArH2dc+7wXWzraC11FngaTsYu6zRwJXg=";
+
+  # ── Fixed-output derivation: repository cache ─────────────────────────
+  # Runs `bazel fetch` with network access (allowed for fixed-output derivations) to download
+  # all external modules declared in MODULE.bazel into a repository_cache.
+  # The cache is content-addressed, so the hash is stable across builds.
+  #
+  # This is the standard nixpkgs pattern for offline Bazel builds.
+  # See: pkgs/by-name/ba/bazel_8/build-support/bazelPackage.nix
+  bazelRepoCache = stdenv.mkDerivation {
+    name = "bazel-hello-world-repo-cache";
+
+    src = ./project;
+
+    nativeBuildInputs = [bazel_8];
+
+    buildPhase = ''
+      runHook preBuild
+
+      export HOME=$(mktemp -d)
+      mkdir -p "$HOME/repo_cache"
+
+      bazel --batch fetch \
+        --registry=file://${registry} \
+        --repository_cache="$HOME/repo_cache" \
+        //src:hello-world
+
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+
+      mkdir -p $out/repo_cache
+      cp -r --reflink=auto "$HOME/repo_cache"/* $out/repo_cache
+
+      bazel shutdown || true
+
+      runHook postInstall
+    '';
+
+    outputHashMode = "recursive";
+    outputHashAlgo = "sha256";
+    outputHash = "sha256-Tcf0QP5DXwGb5z0vGlKH9rFcFVcIIjzTLh3SKFA52Ak=";
   };
 in
   stdenv.mkDerivation {
@@ -71,32 +113,31 @@ in
 
     src = ./project;
 
-    # ── recursive-nix ────────────────────────────────────────────────────────
+    # ── recursive-nix ──────────────────────────────────────────────────────
     # Exposes the Nix daemon socket at /build/.nix-socket inside the sandbox
     # so nixception can use the local Nix store as its remote-execution backend.
     requiredSystemFeatures = ["recursive-nix"];
 
-    # ── nixception setup hook ────────────────────────────────────────────────
+    # ── nixception setup hook ──────────────────────────────────────────────
     # gcc is injected into the runner sandbox so remote compilation/linking
     # actions can find it.  The hook registers nixceptionStartPhase as a
     # preConfigurePhase and tears the server down via exitHook / failureHook.
     #
-    # bazel_7 is needed as a build tool to drive the build.
+    # bazel_8 is needed as a build tool to drive the build.
     nativeBuildInputs = [
       (nixceptionHook.withPackages [gcc])
-      bazel_7
+      bazel_8
+      lndir
     ];
 
-    # ── Bazel environment setup ──────────────────────────────────────────────
+    # ── Bazel environment setup ────────────────────────────────────────────
     # Bazel needs a writable HOME for its output base, caches, and internal
     # state.  Inside the nix sandbox $HOME may not exist or be writable.
     # We also explicitly set CC/CXX so Bazel's auto-detected C++ toolchain
     # matches what is available in the nixception runner sandbox.
     #
-    # The distdir is populated with the pre-fetched archives so that Bazel can
-    # resolve its implicit DEFAULT.WORKSPACE.SUFFIX dependencies without
-    # network access.  --distdir is Bazel's standard offline mechanism: it
-    # looks for files by basename and verifies their SHA-256 before using them.
+    # The repo cache is symlinked (via lndir) so that Bazel can write marker
+    # files while still reading the pre-fetched content from the Nix store.
     preConfigure = ''
       export HOME=$(mktemp -d)
       export CC="${gcc}/bin/gcc"
@@ -105,27 +146,22 @@ in
       # Bazel may also want a writable TEST_TMPDIR
       export TEST_TMPDIR=$(mktemp -d)
 
-      # ── Populate Bazel distdir ───────────────────────────────────────────
-      # Symlink pre-fetched archives with their original basenames so that
-      # Bazel's --distdir can find them by name and validate by hash.
-      BAZEL_DISTDIR="$HOME/bazel-distdir"
-      mkdir -p "$BAZEL_DISTDIR"
-      ln -s ${bazelSkylib} "$BAZEL_DISTDIR/bazel-skylib-1.6.1.tar.gz"
-      ln -s ${rulesCC} "$BAZEL_DISTDIR/rules_cc-0.0.9.tar.gz"
-      ln -s ${rulesPython} "$BAZEL_DISTDIR/rules_python-0.24.0.tar.gz"
-      echo "distdir contents:" >&2
-      ls -la "$BAZEL_DISTDIR" >&2
+      # ── Populate writable repo cache from FOD ───────────────────────────
+      mkdir repo_cache
+      lndir -silent ${bazelRepoCache}/repo_cache repo_cache
+      echo "repo_cache contents:" >&2
+      find repo_cache -maxdepth 2 -type f | head -20 >&2
     '';
 
-    # ── build ────────────────────────────────────────────────────────────────
+    # ── build ──────────────────────────────────────────────────────────────
     # --remote_executor:         send all actions to nixception
     # --remote_instance_name:    must match nixception's configured instance
     # --spawn_strategy=remote:   bypass Bazel's local sandbox (which conflicts
     #                            with the nix build sandbox)
     # --noremote_local_fallback: fail loudly instead of silently retrying local
     # --remote_download_all:     pull outputs back so we can install them
-    # --noenable_bzlmod:         safety belt to ensure pure WORKSPACE mode
-    # --distdir:                 pre-fetched archives for offline resolution
+    # --registry:                use pinned BCR snapshot for module resolution
+    # --repository_cache:        pre-fetched deps for offline build
     # --verbose_failures:        show full command lines on error
     # --action_env:              forward CC/CXX to action environment so Bazel's
     #                            toolchain detection uses the right compiler
@@ -139,8 +175,8 @@ in
         --spawn_strategy=remote \
         --noremote_local_fallback \
         --remote_download_all \
-        --noenable_bzlmod \
-        --distdir="$BAZEL_DISTDIR" \
+        --registry=file://${registry} \
+        --repository_cache=repo_cache \
         --action_env=CC="${gcc}/bin/gcc" \
         --action_env=CXX="${gcc}/bin/g++" \
         --action_env=PATH \
@@ -153,7 +189,7 @@ in
       runHook postBuild
     '';
 
-    # ── install & verify ─────────────────────────────────────────────────────
+    # ── install & verify ───────────────────────────────────────────────────
     # Copy the compiled binary to $out and verify it actually runs and
     # produces the expected output.
     installPhase = ''
@@ -192,7 +228,7 @@ in
     '';
 
     meta = {
-      description = "Integration-test: build a C++ hello-world through Bazel + nixception (remote execution)";
+      description = "Integration-test: build a C++ hello-world through Bazel 8 + nixception (remote execution)";
       license = lib.licenses.asl20;
       maintainers = with lib.maintainers; [layus];
       platforms = lib.platforms.linux;
