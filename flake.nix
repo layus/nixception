@@ -464,6 +464,9 @@
             spdlog-nixception-recc-test = pkgs.callPackage integration_tests/recc/spdlog-with-nixception.nix {
               inherit nixceptionHook buildbox;
             };
+            bazel-cc-hello-nixception-test = pkgs.callPackage integration_tests/bazel/cc-hello-with-nixception.nix {
+              inherit nixceptionHook;
+            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;

@@ -506,22 +506,35 @@ static void copy_with_parents(const fs::path &src,
 
 /// Copy all declared command outputs into $out/outputs/, preserving
 /// directory structure.  Missing outputs are silently skipped.
+///
+/// Per the REAPI v2.1 spec (Command message):
+///   "If `output_paths` is used, `output_files` and `output_directories`
+///    will be ignored!"
+/// So when `output_paths` is present and non-empty we use it exclusively;
+/// otherwise we fall back to the deprecated `output_files` +
+/// `output_directories` fields.
 static void collect_command_outputs(const json &manifest, const fs::path &out_dir) {
     const fs::path outputs_dir = out_dir / "outputs";
 
-    if (manifest.contains("output_directories")) {
-        for (const auto &d : manifest["output_directories"]) {
-            copy_with_parents(fs::path(d.get<std::string>()), outputs_dir);
-        }
-    }
-    if (manifest.contains("output_files")) {
-        for (const auto &f : manifest["output_files"]) {
-            copy_with_parents(fs::path(f.get<std::string>()), outputs_dir);
-        }
-    }
-    if (manifest.contains("output_paths")) {
+    bool has_output_paths = manifest.contains("output_paths")
+                            && !manifest["output_paths"].empty();
+
+    if (has_output_paths) {
+        // v2.1+: unified output_paths supersedes the legacy fields.
         for (const auto &p : manifest["output_paths"]) {
             copy_with_parents(fs::path(p.get<std::string>()), outputs_dir);
+        }
+    } else {
+        // Legacy: separate output_files and output_directories.
+        if (manifest.contains("output_directories")) {
+            for (const auto &d : manifest["output_directories"]) {
+                copy_with_parents(fs::path(d.get<std::string>()), outputs_dir);
+            }
+        }
+        if (manifest.contains("output_files")) {
+            for (const auto &f : manifest["output_files"]) {
+                copy_with_parents(fs::path(f.get<std::string>()), outputs_dir);
+            }
         }
     }
 }

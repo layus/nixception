@@ -1,0 +1,3 @@
+# Empty WORKSPACE file.
+# Using WORKSPACE mode with no external dependencies so that Bazel
+# does not need network access (important inside the Nix build sandbox).
