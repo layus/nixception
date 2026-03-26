@@ -467,6 +467,9 @@
             bazel-cc-hello-nixception-test = pkgs.callPackage integration_tests/bazel/cc-hello-with-nixception.nix {
               inherit nixceptionHook;
             };
+            bazel-nixpkgs-cc-hello-nixception-test = pkgs.callPackage integration_tests/rules-nixpkgs/cc-hello-with-nixception.nix {
+              inherit nixceptionHook;
+            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;
