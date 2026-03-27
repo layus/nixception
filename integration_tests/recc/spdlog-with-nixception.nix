@@ -52,7 +52,7 @@
 }:
 stdenv.mkDerivation (finalAttrs: {
   pname = "spdlog";
-  version = "1.17.0";
+  version = "1.17.0-test";
 
   # Source: matches the spdlog derivation used elsewhere in the tree.
   src = fetchFromGitHub {
