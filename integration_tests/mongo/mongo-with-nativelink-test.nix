@@ -22,9 +22,9 @@ writeShellScriptBin "mongodb-with-nativelink-test" ''
   mkdir -p "$MONGO_DATA_DIR"
 
   ${mongodb}/bin/mongod --dbpath "$MONGO_DATA_DIR" 2>&1 | tee -i integration_tests/mongo/mongo.log &
-  ${wait4x}/bin/wait4x tcp localhost:27017
+  ${wait4x}/bin/wait4x tcp localhost:27017 --quiet
   ${nativelink}/bin/nativelink -- integration_tests/mongo/mongo.json5 2>&1 | tee -i integration_tests/mongo/nativelink.log &
-  ${wait4x}/bin/wait4x tcp localhost:50051
+  ${wait4x}/bin/wait4x tcp localhost:50051 --quiet
 
   if [[ $OSTYPE == "darwin"* ]]; then
       CACHE_DIR=$(mktemp -d "''${TMPDIR}mongo-integration-test")

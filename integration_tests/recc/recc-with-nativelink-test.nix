@@ -20,7 +20,7 @@ writeShellScriptBin "recc-with-nativelink-test" ''
 
   RUST_BACKTRACE=1 ${nixception}/bin/nixception 2>&1 | tee -i integration_tests/recc/nativelink.log &
 
-  ${wait4x}/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s
+  ${wait4x}/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s --quiet
 
   recc_output=$(
     cd integration_tests/recc && \

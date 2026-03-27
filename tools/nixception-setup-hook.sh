@@ -104,7 +104,7 @@ nixceptionStartPhase() {
     failureHook+=$'\n_nixceptionStop\n'
 
     # ── Wait for the server to be ready ──────────────────────────────────────
-    @wait4x@/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s
+    @wait4x@/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s --quiet
     echo "nixception-hook: server is ready (pid $_pid)"
 }
 
