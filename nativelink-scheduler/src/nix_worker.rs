@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
-use nix_compat::store_path::StorePath;
+use nix_compat::store_path::{STORE_DIR_WITH_SLASH, StorePath};
 
-use crate::runner_info::RunnerInfo;
+use crate::runner_info::{RunnerInfo, compute_hash_derivation_modulo};
 
 use bstr::BString;
 use bytes::Bytes;
@@ -50,6 +50,79 @@ use crate::worker_scheduler::WorkerScheduler;
 struct PathEntry {
     path: PathBuf,
     store_path: StorePath<String>,
+}
+
+/// Information about a store path's deriver, resolved via the Nix daemon.
+///
+/// The corresponding `hash_derivation_modulo` is not stored here — it
+/// lives in the shared `hash_cache` (`HashMap<String, [u8; 32]>`) that
+/// is passed through [`NixWorker::resolve_discovered_store_paths`] and
+/// later read by the [`Derivation::hash_derivation_modulo`] closure.
+#[derive(Clone, Debug)]
+struct ResolvedInputDrv {
+    /// The `.drv` store path of the deriver.
+    drv_store_path: StorePath<String>,
+    /// Which output of the deriver produces the discovered store path.
+    output_name: String,
+}
+
+/// Scan a byte slice for all `/nix/store/<hash>-<name>` references and
+/// return them as a deduplicated set of [`StorePath`]s.
+///
+/// The scanner looks for the literal prefix `/nix/store/` and then
+/// attempts to parse the longest valid store-path string starting there.
+/// Invalid matches (e.g. truncated paths) are silently skipped.
+fn scan_nix_store_paths(haystack: &[u8]) -> BTreeSet<StorePath<String>> {
+    let prefix = STORE_DIR_WITH_SLASH.as_bytes(); // b"/nix/store/"
+    let mut result = BTreeSet::new();
+    let mut pos = 0;
+    while pos + prefix.len() < haystack.len() {
+        // Find the next occurrence of the prefix.
+        let Some(start) = haystack[pos..]
+            .windows(prefix.len())
+            .position(|w| w == prefix)
+            .map(|i| i + pos)
+        else {
+            break;
+        };
+
+        // After the prefix we expect 32 nixbase32 chars, a dash, then
+        // one or more valid name characters.  Rather than hard-coding
+        // the grammar we greedily collect characters that are valid in
+        // a store-path name (alphanumeric plus - _ . + ? =) and let
+        // `StorePath::from_absolute_path` decide if it's valid.
+        let path_start = start;
+        let mut end = start + prefix.len();
+        while end < haystack.len() {
+            let ch = haystack[end];
+            if ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_' | b'.' | b'+' | b'?' | b'=') {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+
+        if let Ok(sp) = StorePath::<String>::from_absolute_path(&haystack[path_start..end]) {
+            result.insert(sp);
+        }
+
+        // Advance past this match to avoid re-matching the same prefix.
+        pos = start + prefix.len();
+    }
+    result
+}
+
+/// Scan multiple strings and return the union of all discovered store
+/// paths.
+#[allow(single_use_lifetimes)] // lifetime required for `impl Trait` parameter
+fn scan_nix_store_paths_in_strings<'a>(
+    strings: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<StorePath<String>> {
+    let mut result = BTreeSet::new();
+    for s in strings {
+        result.extend(scan_nix_store_paths(s.as_bytes()));
+    }
+    result
 }
 
 /// A worker that executes a single action end-to-end, reporting every state
@@ -277,6 +350,161 @@ impl NixWorker {
 
     // ----- derivation helpers -----
 
+    /// Given a set of discovered store paths (from command args, env vars,
+    /// etc.), query the Nix daemon for each one to find its deriver, read
+    /// the `.drv` to determine which output name produces that path, and
+    /// compute the `hash_derivation_modulo`.
+    ///
+    /// Returns a vec of [`ResolvedInputDrv`] entries (one per unique
+    /// deriver) ready to be added to the action derivation's
+    /// `input_derivations`.
+    ///
+    /// Store paths that have no deriver (e.g. source-only paths or
+    /// bootstrap tarballs) are returned separately so the caller can add
+    /// them to `input_sources` instead.
+    async fn resolve_discovered_store_paths(
+        &self,
+        discovered: &BTreeSet<StorePath<String>>,
+        already_known_sources: &BTreeSet<StorePath<String>>,
+        hash_cache: &mut HashMap<String, [u8; 32]>,
+    ) -> Result<(Vec<ResolvedInputDrv>, Vec<StorePath<String>>), Error> {
+        let mut resolved_drvs: Vec<ResolvedInputDrv> = Vec::new();
+        let mut extra_sources: Vec<StorePath<String>> = Vec::new();
+
+        // Deduplicate by deriver so we don't query/resolve the same .drv
+        // multiple times (different store paths may share a deriver).
+        let mut seen_drvs: BTreeSet<String> = BTreeSet::new();
+
+        for sp in discovered {
+            // Skip paths that are already in input_sources (CAS entries).
+            if already_known_sources.contains(sp) {
+                continue;
+            }
+
+            let abs_path = sp.to_absolute_path();
+
+            // Query the Nix daemon for path info.
+            let path_info = match self.connection.query_path_info(&abs_path).await {
+                Ok(Some(info)) => info,
+                Ok(None) => {
+                    event!(
+                        Level::WARN,
+                        store_path = %abs_path,
+                        "Discovered store path is not valid in the store, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    event!(
+                        Level::WARN,
+                        store_path = %abs_path,
+                        error = ?e,
+                        "Failed to query path info for discovered store path, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // The deriver field is an OptionalStorePath (a NixString that
+            // may be empty when the path has no known deriver).
+            let deriver_bytes: &[u8] = path_info.deriver.0 .0.as_ref();
+            if deriver_bytes.is_empty() || deriver_bytes == b"unknown-deriver" {
+                // No deriver — add to input_sources so the path is
+                // available in the sandbox directly.
+                event!(
+                    Level::DEBUG,
+                    store_path = %abs_path,
+                    "No deriver for discovered store path, adding as input source"
+                );
+                extra_sources.push(sp.clone());
+                continue;
+            }
+
+            let deriver_str = String::from_utf8_lossy(deriver_bytes);
+
+            // The deriver may or may not have the /nix/store/ prefix
+            // depending on the daemon protocol version.  Normalise to
+            // an absolute path.
+            let drv_abs_path = if deriver_str.starts_with('/') {
+                deriver_str.to_string()
+            } else {
+                format!("{STORE_DIR_WITH_SLASH}{deriver_str}")
+            };
+
+            // Deduplicate by deriver path.
+            if !seen_drvs.insert(drv_abs_path.clone()) {
+                continue;
+            }
+
+            // Parse the deriver as a StorePath.
+            let drv_store_path =
+                StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes()).map_err(|e| {
+                    make_err!(
+                        Code::Internal,
+                        "Bad deriver path for {abs_path} -> {drv_abs_path}: {e}"
+                    )
+                })?;
+
+            // Read the .drv to find which output name produces our store
+            // path, and compute its hash_derivation_modulo.
+            let drv_bytes = tokio::fs::read(&drv_abs_path).await.map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Reading deriver {drv_abs_path}: {e}"
+                )
+            })?;
+            let drv = Derivation::from_aterm_bytes(&drv_bytes).map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Parsing deriver {drv_abs_path}: {e:?}"
+                )
+            })?;
+
+            // Find which output name corresponds to the discovered store
+            // path.  Fall back to "out" if we can't match (e.g. the
+            // output paths aren't filled in).
+            let output_name = drv
+                .outputs
+                .iter()
+                .find_map(|(name, output)| {
+                    output.path.as_ref().and_then(|p| {
+                        if p.to_absolute_path() == abs_path {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "out".to_string());
+
+            // Compute hash_derivation_modulo (synchronous, reads .drv
+            // files from /nix/store).  The returned value is already
+            // inserted into hash_cache as a side effect; we don't need
+            // it here.
+            let _hash = compute_hash_derivation_modulo(&drv_abs_path, hash_cache)
+                .err_tip(|| {
+                    format!(
+                        "Computing hash_derivation_modulo for deriver {drv_abs_path}"
+                    )
+                })?;
+
+            event!(
+                Level::INFO,
+                store_path = %abs_path,
+                deriver = %drv_abs_path,
+                output_name = %output_name,
+                "Resolved discovered store path to input derivation"
+            );
+
+            resolved_drvs.push(ResolvedInputDrv {
+                drv_store_path,
+                output_name,
+            });
+        }
+
+        Ok((resolved_drvs, extra_sources))
+    }
+
     /// Prepare and upload a Nix derivation for this action:
     ///  1. Fetch the command and input tree from the CAS
     ///  2. Build a Nix derivation from the inputs
@@ -301,7 +529,63 @@ impl NixWorker {
         .await
         .err_tip(|| "Converting digest to Directory")?;
 
-        // Build a JSON manifest describing the action for the C++ runner.
+        // ── Discover Nix store paths referenced by the action ───────────
+        //
+        // Scan the command arguments and environment variable values for
+        // /nix/store/… references.  These may come from e.g.
+        // rules_nixpkgs resolving a CC toolchain to a concrete store
+        // path.  Without adding them to the derivation's inputs the Nix
+        // sandbox would not contain them and the action would fail.
+        let mut discovered_store_paths = scan_nix_store_paths_in_strings(
+            command
+                .arguments
+                .iter()
+                .map(String::as_str),
+        );
+        discovered_store_paths.extend(scan_nix_store_paths_in_strings(
+            command
+                .environment_variables
+                .iter()
+                .flat_map(|var| [var.name.as_str(), var.value.as_str()]),
+        ));
+
+        // The CAS entries are already going into input_sources; exclude
+        // them from the "discovered" set so we don't query the daemon
+        // for paths we already own.
+        let cas_input_sources: BTreeSet<StorePath<String>> =
+            entries.iter().map(|e| e.store_path.to_owned()).collect();
+
+        // Resolve each discovered store path: find its deriver (if any),
+        // determine the output name, and compute hash_derivation_modulo.
+        //
+        // We seed the hash cache with the runner's hash so it is never
+        // re-read from disk.
+        let ri = &self.runner_info;
+        let mut hash_cache: HashMap<String, [u8; 32]> = HashMap::from([(
+            ri.drv_store_path.to_absolute_path(),
+            ri.hash_derivation_modulo,
+        )]);
+
+        let (resolved_drvs, extra_sources) = self
+            .resolve_discovered_store_paths(
+                &discovered_store_paths,
+                &cas_input_sources,
+                &mut hash_cache,
+            )
+            .await
+            .err_tip(|| "Resolving discovered store paths")?;
+
+        if !resolved_drvs.is_empty() || !extra_sources.is_empty() {
+            event!(
+                Level::INFO,
+                num_input_drvs = resolved_drvs.len(),
+                num_extra_sources = extra_sources.len(),
+                "Discovered Nix store path dependencies in action"
+            );
+        }
+
+        // ── Build the JSON manifest ────────────────────────────────────
+        //
         // The manifest is passed to the builder via Nix's passAsFile
         // mechanism: the derivation environment contains
         //   passAsFile = "manifest"
@@ -342,32 +626,49 @@ impl NixWorker {
             ("out".into(), BString::default()),
         ]);
 
-        let ri = &self.runner_info;
+        // ── Build input_derivations ────────────────────────────────────
+        //
+        // Always include the runner.  Then merge in every deriver that
+        // was resolved from discovered store paths.
+        let mut input_derivations: BTreeMap<StorePath<String>, BTreeSet<String>> =
+            BTreeMap::from([(ri.drv_store_path.clone(), BTreeSet::from(["out".into()]))]);
 
-        // Use the runner .drv store path directly from RunnerInfo rather than
-        // querying the Nix daemon's query_path_info (whose `deriver` field may
-        // not always contain a valid absolute store path).
-        let builder_deriver = ri.drv_store_path.clone();
+        for resolved in &resolved_drvs {
+            input_derivations
+                .entry(resolved.drv_store_path.clone())
+                .or_default()
+                .insert(resolved.output_name.clone());
+        }
+
+        // ── Build input_sources ────────────────────────────────────────
+        //
+        // CAS entries plus any discovered store paths that had no deriver.
+        let mut input_sources = cas_input_sources;
+        input_sources.extend(extra_sources);
 
         let mut derivation: Derivation = Derivation {
             // No arguments needed — the C++ runner reads $manifestPath.
             arguments: vec![],
             builder: ri.builder_path.clone().into(),
             environment,
-            input_derivations: BTreeMap::from([(builder_deriver, BTreeSet::from(["out".into()]))]),
-            input_sources: entries.iter().map(|e| e.store_path.to_owned()).collect(),
+            input_derivations,
+            input_sources,
             outputs,
             system: ri.system.clone().into(),
         };
 
+        // ── Compute hash_derivation_modulo ─────────────────────────────
+        //
+        // The closure must return the hash for every input derivation.
+        // We pre-populated hash_cache with the runner and all resolved
+        // derivers above, so lookup is infallible.
         let hash_modulo = derivation.hash_derivation_modulo(|input_drv_path| {
-            // The only input derivation is the runner.
-            assert_eq!(
-                input_drv_path.to_absolute_path(),
-                ri.drv_store_path.to_absolute_path(),
-                "Unexpected input derivation"
-            );
-            ri.hash_derivation_modulo
+            let abs = input_drv_path.to_absolute_path();
+            *hash_cache.get(&abs).unwrap_or_else(|| {
+                panic!(
+                    "BUG: hash_derivation_modulo not pre-computed for {abs}"
+                )
+            })
         });
         derivation
             .calculate_output_paths("reapi-action", &hash_modulo)
@@ -558,5 +859,123 @@ impl NixWorker {
         }
 
         Ok(entries)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A valid 32-char nixbase32 hash for use in test store paths.
+    const HASH_A: &str = "00000000000000000000000000000000";
+    const HASH_B: &str = "1111111111111111111111111111111a";
+    const HASH_C: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz0";
+
+    #[test]
+    fn scan_basic_store_path() {
+        let input = format!("/nix/store/{HASH_A}-hello-1.0");
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 1);
+        let sp = paths.into_iter().next().unwrap();
+        assert_eq!(sp.to_absolute_path(), input);
+    }
+
+    #[test]
+    fn scan_store_path_with_trailing_slash() {
+        // The scanner should extract just the store path root, not the
+        // trailing /bin/gcc part (slashes are not valid name characters).
+        let input = format!("/nix/store/{HASH_A}-gcc-13.2.0/bin/gcc");
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 1);
+        let sp = paths.into_iter().next().unwrap();
+        assert_eq!(
+            sp.to_absolute_path(),
+            format!("/nix/store/{HASH_A}-gcc-13.2.0")
+        );
+    }
+
+    #[test]
+    fn scan_multiple_paths_in_one_string() {
+        let input = format!(
+            "PATH=/nix/store/{HASH_A}-coreutils-9.4/bin:/nix/store/{HASH_B}-gcc-13.2.0/bin"
+        );
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 2);
+        let abs: Vec<String> = paths.into_iter().map(|p| p.to_absolute_path()).collect();
+        assert!(abs.contains(&format!("/nix/store/{HASH_A}-coreutils-9.4")));
+        assert!(abs.contains(&format!("/nix/store/{HASH_B}-gcc-13.2.0")));
+    }
+
+    #[test]
+    fn scan_deduplicates_identical_paths() {
+        let path = format!("/nix/store/{HASH_A}-hello-1.0");
+        let input = format!("{path} {path} {path}");
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn scan_ignores_truncated_path() {
+        // Only the prefix — no hash or name follows.
+        let paths = scan_nix_store_paths(b"/nix/store/");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn scan_ignores_invalid_hash() {
+        // Spaces are not valid nixbase32 characters.
+        let paths = scan_nix_store_paths(b"/nix/store/not a valid hash-name");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn scan_empty_input() {
+        let paths = scan_nix_store_paths(b"");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn scan_no_store_paths() {
+        let paths = scan_nix_store_paths(b"gcc -O2 -Wall -o hello hello.c");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn scan_env_var_style_strings() {
+        let strings = vec![
+            format!("CC=/nix/store/{HASH_A}-gcc-wrapper-13/bin/gcc"),
+            format!("CXX=/nix/store/{HASH_A}-gcc-wrapper-13/bin/g++"),
+            "LANG=C.UTF-8".to_string(),
+            format!("PATH=/nix/store/{HASH_B}-coreutils-9.4/bin:/nix/store/{HASH_C}-bash-5.2/bin"),
+        ];
+        let paths =
+            scan_nix_store_paths_in_strings(strings.iter().map(String::as_str));
+        // gcc-wrapper appears in two vars but is the same store path → 1
+        // coreutils → 1, bash → 1
+        assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn scan_path_at_end_of_buffer() {
+        // Ensure we don't panic when the store path reaches the very end
+        // of the buffer without any trailing character.
+        let input = format!("/nix/store/{HASH_A}-pkg");
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn scan_adjacent_paths_separated_by_colon() {
+        // Colons are not valid store-path name characters, so they act
+        // as separators.
+        let input = format!(
+            "/nix/store/{HASH_A}-aaa:/nix/store/{HASH_B}-bbb"
+        );
+        let paths = scan_nix_store_paths(input.as_bytes());
+        assert_eq!(paths.len(), 2);
     }
 }

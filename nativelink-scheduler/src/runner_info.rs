@@ -118,7 +118,13 @@ fn default_system() -> &'static str {
 /// (not `FnMut`), we pre-compute hashes for all direct input derivations
 /// *before* calling it, so the closure only needs shared (`&`) access to
 /// the cache.
-fn compute_hash_derivation_modulo(
+///
+/// This function is `pub(crate)` so that
+/// [`NixWorker`](crate::nix_worker::NixWorker) can compute hashes for
+/// dynamically-discovered input derivations at action time (e.g. store
+/// paths referenced in command arguments or environment variables that
+/// were resolved by rules_nixpkgs).
+pub(crate) fn compute_hash_derivation_modulo(
     drv_abs_path: &str,
     cache: &mut HashMap<String, [u8; 32]>,
 ) -> Result<[u8; 32], Error> {
