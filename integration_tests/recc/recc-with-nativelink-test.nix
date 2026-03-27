@@ -9,6 +9,8 @@
 writeShellScriptBin "recc-with-nativelink-test" ''
   set -euo pipefail
 
+  _verbose="''${NIXCEPTION_VERBOSE:-0}"
+
   cleanup() {
     local pids=$(jobs -pr)
     [ -n "$pids" ] && kill $pids
@@ -18,15 +20,26 @@ writeShellScriptBin "recc-with-nativelink-test" ''
   # Remove any stale output from a previous run.
   ${coreutils}/bin/rm -f integration_tests/recc/test/main.o
 
-  RUST_BACKTRACE=1 ${nixception}/bin/nixception 2>&1 | tee -i integration_tests/recc/nativelink.log &
+  _rust_log="''${RUST_LOG:-warn}"
+  if [ "$_verbose" = "1" ]; then
+    _rust_log="''${RUST_LOG:-info}"
+  fi
+
+  RUST_LOG="$_rust_log" RUST_BACKTRACE=1 \
+    ${nixception}/bin/nixception 2>&1 | tee -i integration_tests/recc/nativelink.log &
 
   ${wait4x}/bin/wait4x tcp 127.0.0.1:50051 --timeout 30s --quiet
+
+  _recc_verbose=0
+  if [ "$_verbose" = "1" ]; then
+    _recc_verbose=1
+  fi
 
   recc_output=$(
     cd integration_tests/recc && \
     env \
-      RECC_VERBOSE=1 \
-      RECC_LOG_PROGRESS=1 \
+      RECC_VERBOSE=$_recc_verbose \
+      RECC_LOG_PROGRESS=$_recc_verbose \
       RECC_INSTANCE=main \
       RECC_SERVER=127.0.0.1:50051 \
       ${buildbox}/bin/recc \
