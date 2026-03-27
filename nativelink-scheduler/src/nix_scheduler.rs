@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 
+use crate::nix_stats::NixceptionStats;
+
 use async_trait::async_trait;
 use futures::Future;
 use nativelink_config::schedulers::NixProxySpec;
@@ -91,6 +93,10 @@ pub struct NixScheduler<
     /// [`NixWorker`].
     nix_connection: Arc<NixDaemonConnectionPool>,
 
+    /// Cumulative timing statistics shared with all spawned workers.
+    #[metric(group = "nix_stats")]
+    stats: Arc<NixceptionStats>,
+
     /// Weak self-reference so we can pass `Arc<dyn WorkerScheduler>` to
     /// spawned [`NixWorker`] instances from `&self`.
     self_ref: OnceLock<Weak<dyn WorkerScheduler>>,
@@ -163,6 +169,8 @@ impl<
             None, // no worker registry for nix workers
         );
 
+        let stats = Arc::new(NixceptionStats::default());
+
         let scheduler = Arc::new(Self {
             platform_property_manager,
             state_manager,
@@ -170,6 +178,7 @@ impl<
             cas_store,
             runner_info,
             nix_connection,
+            stats,
             self_ref: OnceLock::new(),
         });
 
@@ -230,6 +239,7 @@ impl<
             self.nix_connection.clone(),
             action_info,
             self.runner_info.clone(),
+            self.stats.clone(),
         );
         tokio::spawn(worker.run());
 
@@ -349,7 +359,10 @@ impl<
         Ok(())
     }
 
-    async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {}
+    async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
+        self.stats.log_summary();
+        self.stats.write_summary_file();
+    }
 }
 
 // ---------------------------------------------------------------------------

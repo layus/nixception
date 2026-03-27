@@ -16,11 +16,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::{STORE_DIR_WITH_SLASH, StorePath};
 
+use crate::nix_stats::{NixceptionStats, TimingGuard};
 use crate::runner_info::{RunnerInfo, compute_hash_derivation_modulo};
 
 use bstr::BString;
@@ -145,6 +147,8 @@ pub(crate) struct NixWorker {
     action_info: Arc<ActionInfo>,
     /// Runner metadata for constructing action derivations.
     runner_info: Arc<RunnerInfo>,
+    /// Shared cumulative timing statistics.
+    stats: Arc<NixceptionStats>,
 }
 
 impl NixWorker {
@@ -156,6 +160,7 @@ impl NixWorker {
         connection: Arc<NixDaemonConnectionPool>,
         action_info: Arc<ActionInfo>,
         runner_info: Arc<RunnerInfo>,
+        stats: Arc<NixceptionStats>,
     ) -> Self {
         Self {
             worker_scheduler,
@@ -165,6 +170,7 @@ impl NixWorker {
             connection,
             action_info,
             runner_info,
+            stats,
         }
     }
 
@@ -248,7 +254,20 @@ impl NixWorker {
     /// returning `Ok(())`.  On error an `Err` is returned and the caller
     /// (`run`) is responsible for reporting the failure.
     async fn run_inner(&self) -> Result<(), Error> {
+        let action_start = Instant::now();
+
+        // Cost center: prepare_derivation (encompasses scanning, upload,
+        // and derivation construction).  Scanning and upload are also
+        // recorded individually inside prepare_derivation as sub-costs.
+        let _prep_guard = TimingGuard::new(&self.stats, &self.stats.derivation_prep_us);
         let (drv_path, out_path) = self.prepare_derivation().await?;
+        let prep_elapsed = _prep_guard.elapsed();
+        drop(_prep_guard);
+        event!(
+            Level::DEBUG,
+            prep_ms = prep_elapsed.as_millis(),
+            "prepare_derivation completed"
+        );
 
         // The derivation has been uploaded — transition Queued → Executing.
         event!(
@@ -262,14 +281,47 @@ impl NixWorker {
         ))
         .await;
 
+        // Cost center: execute_derivation
+        let exec_start = Instant::now();
         self.execute_derivation(&drv_path).await?;
+        let exec_elapsed = exec_start.elapsed();
+        self.stats.record(&self.stats.execute_us, exec_elapsed);
+        event!(
+            Level::DEBUG,
+            elapsed_ms = exec_elapsed.as_millis(),
+            "execute_derivation completed"
+        );
 
-        let action_result = self.collect_action_result(Path::new(&out_path)).await?;
+        // Cost center: collect_outputs
+        {
+            let _guard = TimingGuard::new(&self.stats, &self.stats.collect_outputs_us);
+            let action_result = self.collect_action_result(Path::new(&out_path)).await?;
 
-        self.try_update(UpdateOperationType::UpdateWithActionStage(
-            ActionStage::Completed(action_result),
-        ))
-        .await?;
+            // Record totals before sending the final update.
+            let total_elapsed = action_start.elapsed();
+            self.stats
+                .record(&self.stats.total_action_us, total_elapsed);
+            self.stats.increment(&self.stats.actions_total);
+            if action_result.exit_code == 0 && action_result.error.is_none() {
+                self.stats.increment(&self.stats.actions_succeeded);
+            } else {
+                self.stats.increment(&self.stats.actions_failed);
+            }
+
+            let overhead = total_elapsed.saturating_sub(exec_elapsed);
+            event!(
+                Level::INFO,
+                total_ms = total_elapsed.as_millis(),
+                exec_ms = exec_elapsed.as_millis(),
+                overhead_ms = overhead.as_millis(),
+                "Action timing breakdown"
+            );
+
+            self.try_update(UpdateOperationType::UpdateWithActionStage(
+                ActionStage::Completed(action_result),
+            ))
+            .await?;
+        }
 
         Ok(())
     }
@@ -407,7 +459,7 @@ impl NixWorker {
 
             // The deriver field is an OptionalStorePath (a NixString that
             // may be empty when the path has no known deriver).
-            let deriver_bytes: &[u8] = path_info.deriver.0 .0.as_ref();
+            let deriver_bytes: &[u8] = path_info.deriver.0.0.as_ref();
             if deriver_bytes.is_empty() || deriver_bytes == b"unknown-deriver" {
                 // No deriver — add to input_sources so the path is
                 // available in the sandbox directly.
@@ -437,28 +489,21 @@ impl NixWorker {
             }
 
             // Parse the deriver as a StorePath.
-            let drv_store_path =
-                StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes()).map_err(|e| {
-                    make_err!(
-                        Code::Internal,
-                        "Bad deriver path for {abs_path} -> {drv_abs_path}: {e}"
-                    )
-                })?;
+            let drv_store_path = StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes())
+                .map_err(|e| {
+                make_err!(
+                    Code::Internal,
+                    "Bad deriver path for {abs_path} -> {drv_abs_path}: {e}"
+                )
+            })?;
 
             // Read the .drv to find which output name produces our store
             // path, and compute its hash_derivation_modulo.
-            let drv_bytes = tokio::fs::read(&drv_abs_path).await.map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Reading deriver {drv_abs_path}: {e}"
-                )
-            })?;
-            let drv = Derivation::from_aterm_bytes(&drv_bytes).map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Parsing deriver {drv_abs_path}: {e:?}"
-                )
-            })?;
+            let drv_bytes = tokio::fs::read(&drv_abs_path)
+                .await
+                .map_err(|e| make_err!(Code::Internal, "Reading deriver {drv_abs_path}: {e}"))?;
+            let drv = Derivation::from_aterm_bytes(&drv_bytes)
+                .map_err(|e| make_err!(Code::Internal, "Parsing deriver {drv_abs_path}: {e:?}"))?;
 
             // Find which output name corresponds to the discovered store
             // path.  Fall back to "out" if we can't match (e.g. the
@@ -481,11 +526,9 @@ impl NixWorker {
             // files from /nix/store).  The returned value is already
             // inserted into hash_cache as a side effect; we don't need
             // it here.
-            let _hash = compute_hash_derivation_modulo(&drv_abs_path, hash_cache)
-                .err_tip(|| {
-                    format!(
-                        "Computing hash_derivation_modulo for deriver {drv_abs_path}"
-                    )
+            let _hash =
+                compute_hash_derivation_modulo(&drv_abs_path, hash_cache).err_tip(|| {
+                    format!("Computing hash_derivation_modulo for deriver {drv_abs_path}")
                 })?;
 
             event!(
@@ -536,12 +579,11 @@ impl NixWorker {
         // rules_nixpkgs resolving a CC toolchain to a concrete store
         // path.  Without adding them to the derivation's inputs the Nix
         // sandbox would not contain them and the action would fail.
-        let mut discovered_store_paths = scan_nix_store_paths_in_strings(
-            command
-                .arguments
-                .iter()
-                .map(String::as_str),
-        );
+        // Cost center: store-path scanning and resolution.
+        let scan_start = Instant::now();
+
+        let mut discovered_store_paths =
+            scan_nix_store_paths_in_strings(command.arguments.iter().map(String::as_str));
         discovered_store_paths.extend(scan_nix_store_paths_in_strings(
             command
                 .environment_variables
@@ -574,6 +616,16 @@ impl NixWorker {
             )
             .await
             .err_tip(|| "Resolving discovered store paths")?;
+
+        let scan_elapsed = scan_start.elapsed();
+        self.stats
+            .record(&self.stats.store_path_scanning_us, scan_elapsed);
+        event!(
+            Level::DEBUG,
+            elapsed_ms = scan_elapsed.as_millis(),
+            num_discovered = discovered_store_paths.len(),
+            "Store-path scanning completed"
+        );
 
         if !resolved_drvs.is_empty() || !extra_sources.is_empty() {
             event!(
@@ -664,11 +716,9 @@ impl NixWorker {
         // derivers above, so lookup is infallible.
         let hash_modulo = derivation.hash_derivation_modulo(|input_drv_path| {
             let abs = input_drv_path.to_absolute_path();
-            *hash_cache.get(&abs).unwrap_or_else(|| {
-                panic!(
-                    "BUG: hash_derivation_modulo not pre-computed for {abs}"
-                )
-            })
+            *hash_cache
+                .get(&abs)
+                .unwrap_or_else(|| panic!("BUG: hash_derivation_modulo not pre-computed for {abs}"))
         });
         derivation
             .calculate_output_paths("reapi-action", &hash_modulo)
@@ -699,6 +749,8 @@ impl NixWorker {
             .into_iter()
             .collect();
 
+        // Cost center: upload derivation to the Nix store.
+        let upload_start = Instant::now();
         let path_info = self
             .connection
             .add_to_store(
@@ -708,6 +760,21 @@ impl NixWorker {
                 &references,
             )
             .await?;
+        let upload_elapsed = upload_start.elapsed();
+        self.stats
+            .record(&self.stats.upload_to_store_us, upload_elapsed);
+        event!(
+            Level::DEBUG,
+            elapsed_ms = upload_elapsed.as_millis(),
+            "Derivation upload to nix store completed"
+        );
+
+        // The remaining prepare_derivation time (fetching command,
+        // unfolding inputs, building manifest, hashing) is "derivation
+        // prep" overhead.  We approximate it as total prepare time minus
+        // the scan and upload portions that were already recorded.
+        // This is done by the caller (run_inner records the top-level
+        // prepare_derivation span and subtracts).
 
         assert_eq!(&path_info.path.0.0, &drv_path.to_absolute_path());
         Ok((drv_path, out_path))
@@ -952,8 +1019,7 @@ mod tests {
             "LANG=C.UTF-8".to_string(),
             format!("PATH=/nix/store/{HASH_B}-coreutils-9.4/bin:/nix/store/{HASH_C}-bash-5.2/bin"),
         ];
-        let paths =
-            scan_nix_store_paths_in_strings(strings.iter().map(String::as_str));
+        let paths = scan_nix_store_paths_in_strings(strings.iter().map(String::as_str));
         // gcc-wrapper appears in two vars but is the same store path → 1
         // coreutils → 1, bash → 1
         assert_eq!(paths.len(), 3);
@@ -972,9 +1038,7 @@ mod tests {
     fn scan_adjacent_paths_separated_by_colon() {
         // Colons are not valid store-path name characters, so they act
         // as separators.
-        let input = format!(
-            "/nix/store/{HASH_A}-aaa:/nix/store/{HASH_B}-bbb"
-        );
+        let input = format!("/nix/store/{HASH_A}-aaa:/nix/store/{HASH_B}-bbb");
         let paths = scan_nix_store_paths(input.as_bytes());
         assert_eq!(paths.len(), 2);
     }

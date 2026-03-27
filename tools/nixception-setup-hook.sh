@@ -57,6 +57,12 @@ nixceptionStartPhase() {
         exit 1
     }
 
+    # ── Stats file ───────────────────────────────────────────────────────────
+    # Tell the server where to write its timing summary on shutdown.  The
+    # hook reads this file after the server exits and prints it to stderr.
+    export NIXCEPTION_STATS_FILE
+    NIXCEPTION_STATS_FILE="$(mktemp -p /build nixception-stats.XXXXXX)"
+
     # ── Start the server ─────────────────────────────────────────────────────
     # All tools are invoked via their full store paths baked in at hook-install
     # time – none of them need to be on PATH.
@@ -82,6 +88,17 @@ nixceptionStartPhase() {
         echo 'nixception-hook: stopping server (pid $_pid)...' >&2
         kill $_pid 2>/dev/null || true
         wait $_pid 2>/dev/null || true
+
+        # ── Print timing summary ─────────────────────────────────────────
+        if [ -s \"\$NIXCEPTION_STATS_FILE\" ]; then
+            echo '' >&2
+            echo 'nixception-hook: ── timing statistics ──' >&2
+            cat \"\$NIXCEPTION_STATS_FILE\" >&2
+            rm -f \"\$NIXCEPTION_STATS_FILE\"
+        else
+            echo 'nixception-hook: no timing statistics available' >&2
+            rm -f \"\$NIXCEPTION_STATS_FILE\"
+        fi
     }"
     exitHook+=$'\n_nixceptionStop\n'
     failureHook+=$'\n_nixceptionStop\n'

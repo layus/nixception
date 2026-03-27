@@ -110,7 +110,7 @@ async fn inner_main(
         .get_store(NIX_STORE)
         .err_tip(|| "'NIX_STORE' store not found")?;
 
-    let (action_scheduler, _worker_scheduler) = NixScheduler::new(
+    let (action_scheduler, worker_scheduler) = NixScheduler::new(
         &nix_proxy_spec,
         awaited_action_db,
         task_change_notify,
@@ -194,11 +194,12 @@ async fn inner_main(
 
     root_futures.push(tcp_accept_loop(tcp_listener, http, svc, None, socket_addr));
 
-    // Shutdown handler – no worker schedulers to tear down but we still
-    // need to satisfy the protocol so the SIGTERM path works.
+    // Shutdown handler – tear down the scheduler (which logs timing
+    // stats and writes the summary file) then signal completion.
     let mut shutdown_rx = shutdown_tx.subscribe();
     root_futures.push(Box::pin(async move {
-        if shutdown_rx.recv().await.is_ok() {
+        if let Ok(shutdown_guard) = shutdown_rx.recv().await {
+            worker_scheduler.shutdown(shutdown_guard).await;
             let _ = scheduler_shutdown_tx.send(());
         }
         Ok(())
