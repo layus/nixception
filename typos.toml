@@ -1,6 +1,8 @@
 [default.extend-words]
 # `conly_flags` in lre-cc
 conly = "conly"
+# `typ` is a common Rust convention for avoiding the `type` keyword
+typ = "typ"
 
 [default]
 # Old wrong spelling support

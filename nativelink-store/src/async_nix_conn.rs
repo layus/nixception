@@ -328,7 +328,7 @@ impl AsyncNixConn {
 
             // STDERR_ERROR
             0x63787470 => {
-                let id_bytes = self.read_bytes().await?;
+                let typ_bytes = self.read_bytes().await?;
                 let level = self.read_u64().await?;
                 let name_bytes = self.read_bytes().await?;
                 let message_bytes = self.read_bytes().await?;
@@ -344,7 +344,7 @@ impl AsyncNixConn {
                     });
                 }
                 Ok(Msg::Error(StderrError {
-                    id: id_bytes.into(),
+                    typ: typ_bytes.into(),
                     level,
                     name: name_bytes.into(),
                     message: message_bytes.into(),
@@ -357,14 +357,14 @@ impl AsyncNixConn {
             0x53545254 => {
                 let act = self.read_u64().await?;
                 let lvl = self.read_u64().await?;
-                let id = self.read_u64().await?;
+                let typ = self.read_u64().await?;
                 let s_bytes = self.read_bytes().await?;
                 let fields = self.read_logger_fields().await?;
                 let parent = self.read_u64().await?;
                 Ok(Msg::StartActivity(StderrStartActivity {
                     act,
                     lvl,
-                    id,
+                    typ,
                     s: s_bytes.into(),
                     fields,
                     parent,
@@ -380,9 +380,9 @@ impl AsyncNixConn {
             // STDERR_RESULT
             0x52534c54 => {
                 let act = self.read_u64().await?;
-                let id = self.read_u64().await?;
+                let typ = self.read_u64().await?;
                 let fields = self.read_logger_fields().await?;
-                Ok(Msg::Result(StderrResult { act, id, fields }))
+                Ok(Msg::Result(StderrResult { act, typ, fields }))
             }
 
             other => Err(make_err!(
