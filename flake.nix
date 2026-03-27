@@ -445,32 +445,21 @@
               {
                 inherit nativelink buck2;
               };
-            recc-with-nativelink-test = pkgs.callPackage integration_tests/recc/recc-with-nativelink-test.nix {
-              inherit nixception;
-              inherit buildbox wait4x;
-              inherit (pkgs) gcc coreutils;
-            };
-            recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
+            recc-recursive-nix-test = pkgs.callPackage integration_tests/nixception/recc/smoke-test.nix {
               inherit nixceptionHook buildbox;
               inherit (pkgs) gcc;
             };
-            hello-nixception-recc-test = pkgs.callPackage integration_tests/recc/hello-with-nixception.nix {
+            hello-nixception-recc-test = pkgs.callPackage integration_tests/nixception/recc/hello.nix {
               inherit nixceptionHook buildbox;
               inherit (pkgs) gcc fetchurl;
             };
-            zlib-nixception-recc-test = pkgs.callPackage integration_tests/recc/zlib-with-nixception.nix {
+            spdlog-nixception-recc-test = pkgs.callPackage integration_tests/nixception/recc/spdlog.nix {
               inherit nixceptionHook buildbox;
             };
-            spdlog-nixception-recc-test = pkgs.callPackage integration_tests/recc/spdlog-with-nixception.nix {
-              inherit nixceptionHook buildbox;
-            };
-            bazel-cc-hello-nixception-test = pkgs.callPackage integration_tests/bazel/cc-hello-with-nixception.nix {
+            bazel-nixpkgs-cc-hello-nixception-test = pkgs.callPackage integration_tests/nixception/bazel/rules-nixpkgs-hello.nix {
               inherit nixceptionHook;
             };
-            bazel-nixpkgs-cc-hello-nixception-test = pkgs.callPackage integration_tests/rules-nixpkgs/cc-hello-with-nixception.nix {
-              inherit nixceptionHook;
-            };
-            abseil-cpp-nixception-test = pkgs.callPackage integration_tests/abseil-cpp/abseil-cpp-with-nixception.nix {
+            abseil-cpp-nixception-test = pkgs.callPackage integration_tests/nixception/bazel/abseil-cpp.nix {
               inherit nixceptionHook;
             };
 

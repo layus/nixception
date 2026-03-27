@@ -1,7 +1,7 @@
 {
   # Integration test: build spdlog via recc + nixception.
   #
-  # Modeled after integration_tests/recc/zlib-with-nixception.nix but adapted for
+  # Modeled after the (now removed) zlib-with-nixception test but adapted for
   # a CMake-based project (spdlog).  CMake probes the compiler during
   # configurePhase, so the nixception server must already be listening at that
   # point.  The nixception hook registers nixceptionStartPhase as a
@@ -35,7 +35,7 @@
   # Called from the top-level flake, e.g.:
   #
   #   spdlog-nixception-recc-test = pkgs.callPackage
-  #     integration_tests/recc/spdlog-with-nixception.nix {
+  #     integration_tests/nixception/recc/spdlog.nix {
   #       inherit nixceptionHook buildbox;
   #     };
   #

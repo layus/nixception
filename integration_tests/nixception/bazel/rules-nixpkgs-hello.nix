@@ -1,4 +1,4 @@
-# integration_tests/rules-nixpkgs/cc-hello-with-nixception.nix
+# integration_tests/nixception/bazel/rules-nixpkgs-hello.nix
 #
 # Integration test: build a C++ project via Bazel 8 + rules_nixpkgs + nixception.
 #
@@ -36,7 +36,7 @@
 # Called from the top-level flake, e.g.:
 #
 #   bazel-nixpkgs-cc-hello-nixception-test = pkgs.callPackage
-#     integration_tests/rules-nixpkgs/cc-hello-with-nixception.nix {
+#     integration_tests/nixception/bazel/rules-nixpkgs-hello.nix {
 #       inherit nixceptionHook;
 #     };
 #
@@ -68,7 +68,7 @@
 in
   (bazelPackage {
     name = "bazel-nixpkgs-cc-hello-nixception-test";
-    src = ./project;
+    src = ./rules-nixpkgs-hello;
     inherit registry;
 
     targets = ["//src:hello-world"];

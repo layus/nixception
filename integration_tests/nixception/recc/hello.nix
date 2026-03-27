@@ -1,4 +1,4 @@
-# integration_tests/recc/hello-with-nixception.nix
+# integration_tests/nixception/recc/hello.nix
 #
 # Integration test: build GNU Hello via recc + nixception.
 #
@@ -36,7 +36,7 @@
 # Called from the top-level flake, e.g.:
 #
 #   hello-nixception-recc-test = pkgs.callPackage
-#     integration_tests/recc/hello-with-nixception.nix {
+#     integration_tests/nixception/recc/hello.nix {
 #       inherit nixceptionHook buildbox;
 #       inherit (pkgs) gcc fetchurl;
 #     };
@@ -48,8 +48,7 @@
   stdenv,
   fetchurl,
   writeShellScriptBin,
-}:
-let
+}: let
   # ── recc wrapper ───────────────────────────────────────────────────────────
   # Wraps `recc <compiler>` in a single-word executable so make does not choke
   # on a two-word CC value (make splits unquoted whitespace in variables).

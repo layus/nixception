@@ -13,7 +13,7 @@ Goal:
 - The integration test can be updated to run `make` with `CC` set to `recc`
   (e.g., `env CC=${buildbox}/bin/recc make`) and validate the produced binary.
 
-Files to create under `integration_tests/recc/test/`:
+Files to create under `integration_tests/nixception/recc/smoke-test/`:
 - `Makefile`         (contents shown below)
 - `main.cpp`         (this file — real implementation below)
 - `greet.h`          (shown below)

@@ -19,7 +19,7 @@
 #
 # The derivation is meant to be called from the top-level flake, e.g.:
 #
-#   recc-recursive-nix-test = pkgs.callPackage integration_tests/recc/test.nix {
+#   recc-recursive-nix-test = pkgs.callPackage integration_tests/nixception/recc/smoke-test.nix {
 #     inherit nixceptionHook buildbox;
 #     inherit (pkgs) gcc;
 #   };
@@ -56,7 +56,7 @@ in
     requiredSystemFeatures = ["recursive-nix"];
 
     # The only source we need is the tiny C++ test files.
-    src = ./test;
+    src = ./smoke-test;
 
     # nixceptionHook.withPackages injects gppSleeper into the runner sandbox so
     # remote compilations go through the sleep wrapper, making uncached runs
