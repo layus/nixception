@@ -331,11 +331,32 @@ impl NixWorker {
     async fn execute_derivation(&self, drv_path: &StorePath<String>) -> Result<(), Error> {
         let drv_abs_path = drv_path.to_absolute_path();
 
-        let build_results = self
-            .connection
-            .build_derivation(&drv_abs_path)
-            .await
-            .err_tip(|| format!("Building derivation {}", drv_abs_path))?;
+        // Run the build alongside a periodic keepalive so the state
+        // manager doesn't time out long-running compilations.
+        let mut keepalive = time::interval(time::Duration::from_secs(30));
+        keepalive.tick().await; // consume the immediate first tick
+
+        let build_results = tokio::select! {
+            res = self.connection.build_derivation(&drv_abs_path) => {
+                res.err_tip(|| format!("Building derivation {}", drv_abs_path))?
+            }
+            _ = async {
+                loop {
+                    keepalive.tick().await;
+                    event!(
+                        Level::DEBUG,
+                        drv_path = ?drv_abs_path,
+                        "Sending keepalive update during build"
+                    );
+                    self.update(UpdateOperationType::UpdateWithActionStage(
+                        ActionStage::Executing,
+                    ))
+                    .await;
+                }
+            } => {
+                unreachable!("keepalive loop never terminates")
+            }
+        };
 
         event!(
             Level::INFO,
