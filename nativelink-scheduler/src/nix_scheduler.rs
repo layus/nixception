@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
+use parking_lot::RwLock;
 
 use crate::nix_stats::NixceptionStats;
+use crate::nix_worker::ScanCache;
 
 use async_trait::async_trait;
 use futures::Future;
@@ -97,6 +100,11 @@ pub struct NixScheduler<
     #[metric(group = "nix_stats")]
     stats: Arc<NixceptionStats>,
 
+    /// Shared cache of per-string store-path scan results.  Avoids
+    /// repeated scanning of identical strings (e.g. the same `PATH`
+    /// value) across actions.
+    scan_cache: ScanCache,
+
     /// Weak self-reference so we can pass `Arc<dyn WorkerScheduler>` to
     /// spawned [`NixWorker`] instances from `&self`.
     self_ref: OnceLock<Weak<dyn WorkerScheduler>>,
@@ -170,6 +178,7 @@ impl<
         );
 
         let stats = Arc::new(NixceptionStats::default());
+        let scan_cache: ScanCache = Arc::new(RwLock::new(HashMap::new()));
 
         let scheduler = Arc::new(Self {
             platform_property_manager,
@@ -179,6 +188,7 @@ impl<
             runner_info,
             nix_connection,
             stats,
+            scan_cache,
             self_ref: OnceLock::new(),
         });
 
@@ -240,6 +250,7 @@ impl<
             action_info,
             self.runner_info.clone(),
             self.stats.clone(),
+            self.scan_cache.clone(),
         );
         tokio::spawn(worker.run());
 

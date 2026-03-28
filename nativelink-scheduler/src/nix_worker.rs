@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use parking_lot::RwLock;
+
 use nix_compat::derivation::{Derivation, Output};
 use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::{STORE_DIR_WITH_SLASH, StorePath};
@@ -52,6 +54,7 @@ use crate::worker_scheduler::WorkerScheduler;
 struct PathEntry {
     path: PathBuf,
     store_path: StorePath<String>,
+    digest: DigestInfo,
 }
 
 /// Information about a store path's deriver, resolved via the Nix daemon.
@@ -127,6 +130,17 @@ fn scan_nix_store_paths_in_strings<'a>(
     result
 }
 
+/// A concurrent cache mapping Nix store paths (of input files) to the
+/// set of `/nix/store/…` references discovered inside their contents.
+///
+/// Shared (via `Arc`) across all [`NixWorker`] instances spawned by a
+/// single [`NixScheduler`](crate::nix_scheduler::NixScheduler).  Because
+/// a file's store path is derived deterministically from its CAS digest,
+/// the same content always maps to the same key — so results computed by
+/// one action are reused by every subsequent action that shares the same
+/// input file.
+pub(crate) type ScanCache = Arc<RwLock<HashMap<String, BTreeSet<StorePath<String>>>>>;
+
 /// A worker that executes a single action end-to-end, reporting every state
 /// transition back to the scheduler through the [`WorkerStateManager`].
 ///
@@ -149,6 +163,10 @@ pub(crate) struct NixWorker {
     runner_info: Arc<RunnerInfo>,
     /// Shared cumulative timing statistics.
     stats: Arc<NixceptionStats>,
+    /// Shared cache of per-file store-path scan results, avoiding
+    /// repeated CAS reads and scanning of identical input files across
+    /// actions.
+    scan_cache: ScanCache,
 }
 
 impl NixWorker {
@@ -161,6 +179,7 @@ impl NixWorker {
         action_info: Arc<ActionInfo>,
         runner_info: Arc<RunnerInfo>,
         stats: Arc<NixceptionStats>,
+        scan_cache: ScanCache,
     ) -> Self {
         Self {
             worker_scheduler,
@@ -171,7 +190,42 @@ impl NixWorker {
             action_info,
             runner_info,
             stats,
+            scan_cache,
         }
+    }
+
+    /// Read a single input file from the CAS, scan its contents for
+    /// `/nix/store/…` references, and return the discovered store paths.
+    ///
+    /// Results are cached in the shared [`ScanCache`] keyed by the
+    /// file's Nix store path (which is derived deterministically from
+    /// the CAS digest, so identical content always has the same key).
+    async fn scan_file_store_paths(
+        &self,
+        entry: &PathEntry,
+    ) -> Result<BTreeSet<StorePath<String>>, Error> {
+        let cache_key = entry.store_path.to_absolute_path();
+
+        // Fast path: check if we already scanned this file.
+        if let Some(cached) = self.scan_cache.read().get(&cache_key) {
+            return Ok(cached.clone());
+        }
+
+        // Slow path: read from CAS, scan, and cache.
+        let content = self
+            .cas_store
+            .get_part_unchunked(StoreKey::Digest(entry.digest), 0, None)
+            .await
+            .err_tip(|| {
+                format!(
+                    "Reading input file {} from CAS for store-path scanning",
+                    entry.path.display()
+                )
+            })?;
+
+        let paths = scan_nix_store_paths(&content);
+        self.scan_cache.write().insert(cache_key, paths.clone());
+        Ok(paths)
     }
 
     // ----- state-transition helpers -----
@@ -612,6 +666,22 @@ impl NixWorker {
                 .flat_map(|var| [var.name.as_str(), var.value.as_str()]),
         ));
 
+        // Also scan the contents of every input file for /nix/store/…
+        // references.  Input files such as shell scripts, wrapper
+        // binaries, or pkg-config files may embed store paths that must
+        // be available in the Nix sandbox.  Results are cached per file
+        // (keyed by the file's Nix store path) so that files shared
+        // across actions are only read and scanned once.
+        for entry in &entries {
+            let file_paths = self.scan_file_store_paths(entry).await.err_tip(|| {
+                format!(
+                    "Scanning input file {} for store-path references",
+                    entry.path.display()
+                )
+            })?;
+            discovered_store_paths.extend(file_paths);
+        }
+
         // The CAS entries are already going into input_sources; exclude
         // them from the "discovered" set so we don't query the daemon
         // for paths we already own.
@@ -933,6 +1003,7 @@ impl NixWorker {
             entries.push(PathEntry {
                 path: root.join(file.name),
                 store_path: key_to_store_path(&StoreKey::Digest(digest))?,
+                digest,
             });
         }
 
