@@ -564,21 +564,53 @@ impl NixWorker {
             }
 
             // Parse the deriver as a StorePath.
-            let drv_store_path = StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes())
-                .map_err(|e| {
-                make_err!(
-                    Code::Internal,
-                    "Bad deriver path for {abs_path} -> {drv_abs_path}: {e}"
-                )
-            })?;
+            let drv_store_path =
+                match StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes()) {
+                    Ok(sp) => sp,
+                    Err(e) => {
+                        event!(
+                            Level::WARN,
+                            store_path = %abs_path,
+                            deriver = %drv_abs_path,
+                            error = %e,
+                            "Bad deriver path for discovered store path, skipping"
+                        );
+                        continue;
+                    }
+                };
 
             // Read the .drv to find which output name produces our store
             // path, and compute its hash_derivation_modulo.
-            let drv_bytes = tokio::fs::read(&drv_abs_path)
-                .await
-                .map_err(|e| make_err!(Code::Internal, "Reading deriver {drv_abs_path}: {e}"))?;
-            let drv = Derivation::from_aterm_bytes(&drv_bytes)
-                .map_err(|e| make_err!(Code::Internal, "Parsing deriver {drv_abs_path}: {e:?}"))?;
+            // The .drv may have been garbage-collected while the output
+            // path is still alive (kept by a GC root).  This is expected
+            // to happen occasionally, so we skip with a warning.
+            let drv_bytes = match tokio::fs::read(&drv_abs_path).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    event!(
+                        Level::WARN,
+                        store_path = %abs_path,
+                        deriver = %drv_abs_path,
+                        error = %e,
+                        "Deriver .drv not found in store (may have been \
+                         garbage-collected), skipping"
+                    );
+                    continue;
+                }
+            };
+            let drv = match Derivation::from_aterm_bytes(&drv_bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    event!(
+                        Level::WARN,
+                        store_path = %abs_path,
+                        deriver = %drv_abs_path,
+                        error = ?e,
+                        "Failed to parse deriver .drv, skipping"
+                    );
+                    continue;
+                }
+            };
 
             // Find which output name corresponds to the discovered store
             // path.  Fall back to "out" if we can't match (e.g. the
@@ -601,10 +633,20 @@ impl NixWorker {
             // files from /nix/store).  The returned value is already
             // inserted into hash_cache as a side effect; we don't need
             // it here.
-            let _hash =
-                compute_hash_derivation_modulo(&drv_abs_path, hash_cache).err_tip(|| {
-                    format!("Computing hash_derivation_modulo for deriver {drv_abs_path}")
-                })?;
+            match compute_hash_derivation_modulo(&drv_abs_path, hash_cache) {
+                Ok(_hash) => {}
+                Err(e) => {
+                    event!(
+                        Level::WARN,
+                        store_path = %abs_path,
+                        deriver = %drv_abs_path,
+                        error = ?e,
+                        "Failed to compute hash_derivation_modulo for \
+                         deriver, skipping"
+                    );
+                    continue;
+                }
+            }
 
             event!(
                 Level::INFO,
