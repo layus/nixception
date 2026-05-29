@@ -86,7 +86,7 @@ in {
   # Go
   gci = {
     description = "Fix go imports.";
-    enable = true;
+    enable = false; # broken in current nixpkgs
     entry = "${pkgs.gci}/bin/gci write";
     inherit excludes;
     name = "gci";
