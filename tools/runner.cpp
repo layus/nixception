@@ -106,8 +106,9 @@ static void print_tree(const fs::path &dir, const std::string &prefix = "") {
     }
     std::cerr << prefix << dir.string() << "/" << std::endl;
     for (auto it = fs::recursive_directory_iterator(
-             dir, fs::directory_options::follow_directory_symlink |
-                      fs::directory_options::skip_permission_denied,
+             dir,
+             fs::directory_options::follow_directory_symlink |
+                 fs::directory_options::skip_permission_denied,
              ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         std::string indent(static_cast<size_t>(it.depth() + 1) * 2, ' ');
@@ -171,48 +172,56 @@ static void copy_inputs(const json &manifest) {
         std::error_code ec;
         fs::create_directories(target.parent_path(), ec);
         if (ec) {
-            die("cannot create parent directory for input '"
-                + target.string() + "': " + ec.message());
+            die("cannot create parent directory for input '" + target.string() +
+                "': " + ec.message());
         }
 
-        fs::copy_file(source, target,
-                      fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            die("cannot copy input " + source.string()
-                + " -> " + target.string() + ": " + ec.message());
+            die("cannot copy input " + source.string() + " -> " +
+                target.string() + ": " + ec.message());
         }
 
         // Make the copy writable (store originals are read-only).
-        fs::permissions(target,
-                        fs::perms::owner_read | fs::perms::owner_write,
+        fs::permissions(target, fs::perms::owner_read | fs::perms::owner_write,
                         fs::perm_options::add, ec);
         if (ec) {
-            die("cannot chmod input '" + target.string()
-                + "': " + ec.message());
+            die("cannot chmod input '" + target.string() +
+                "': " + ec.message());
         }
     }
 }
 
 // ── working directory ───────────────────────────────────────────────────────
 
+/// Extract the working directory from the manifest.
+/// Returns the raw string (may be empty, ".", relative, or absolute).
+static std::string get_working_directory(const json &manifest) {
+    if (manifest.contains("working_directory")) {
+        auto val = manifest["working_directory"].get<std::string>();
+        if (!val.empty()) {
+            return val;
+        }
+    }
+    return ".";
+}
+
 /// Create and chdir into the working directory specified in the manifest.
 /// An empty or "." working_directory means "stay in the current directory".
 /// Returns the effective working directory path.  Dies on failure.
-static std::string setup_working_directory(const json &manifest) {
+static std::string
+setup_working_directory(const std::string &working_directory) {
     std::string cwd = ".";
-    if (manifest.contains("working_directory")) {
-        std::string val = manifest["working_directory"].get<std::string>();
-        if (!val.empty()) {
-            cwd = val;
-        }
+    if (!working_directory.empty()) {
+        cwd = working_directory;
     }
 
     if (cwd != ".") {
         std::error_code ec;
         fs::create_directories(cwd, ec);
         if (ec) {
-            die("cannot create working directory '" + cwd
-                + "': " + ec.message());
+            die("cannot create working directory '" + cwd +
+                "': " + ec.message());
         }
         if (::chdir(cwd.c_str()) != 0) {
             die("chdir('" + cwd + "'): " + std::strerror(errno));
@@ -234,18 +243,18 @@ static void prepare_command_outputs(const json &manifest) {
     auto mkdir_parents = [&](const std::string &p) {
         fs::create_directories(p, ec);
         if (ec) {
-            die("cannot create output directory '" + p
-                + "': " + ec.message());
+            die("cannot create output directory '" + p + "': " + ec.message());
         }
     };
 
     auto mkdir_file_parent = [&](const std::string &p) {
         auto parent = fs::path(p).parent_path();
-        if (parent.empty()) return;
+        if (parent.empty())
+            return;
         fs::create_directories(parent, ec);
         if (ec) {
-            die("cannot create parent directory for output '"
-                + p + "': " + ec.message());
+            die("cannot create parent directory for output '" + p +
+                "': " + ec.message());
         }
     };
 
@@ -291,7 +300,7 @@ static void create_result_dir(const fs::path &out_dir) {
 /// `data()` lazily rebuilds the pointer array whenever new strings have
 /// been pushed since the last call, so callers never see stale pointers.
 class CStringArray {
-public:
+  public:
     void push_back(std::string s) {
         storage_.push_back(std::move(s));
         dirty_ = true;
@@ -306,7 +315,7 @@ public:
         return ptrs_.data();
     }
 
-private:
+  private:
     void finalize() const {
         ptrs_.clear();
         for (const auto &s : storage_) {
@@ -317,7 +326,7 @@ private:
     }
 
     std::vector<std::string> storage_;
-    mutable std::vector<const char *> ptrs_;  // null-terminated
+    mutable std::vector<const char *> ptrs_; // null-terminated
     mutable bool dirty_ = true;
 };
 
@@ -357,8 +366,7 @@ static CStringArray build_child_argv(const json &manifest) {
 /// then wait for the child and write the exit code to $out/exitcode.
 /// Returns the child's exit code.  Dies on infrastructure failures
 /// (fork, waitpid, file creation).
-static int execute_command(const CStringArray &cmd,
-                           const CStringArray &env,
+static int execute_command(const CStringArray &cmd, const CStringArray &env,
                            const fs::path &out_dir) {
     const fs::path stdout_path = out_dir / "stdout";
     const fs::path stderr_path = out_dir / "stderr";
@@ -396,8 +404,7 @@ static int execute_command(const CStringArray &cmd,
         ::close(fd_err);
 
         // execve with the REAPI environment.
-        ::execvpe(cmd.data()[0],
-                  const_cast<char *const *>(cmd.data()),
+        ::execvpe(cmd.data()[0], const_cast<char *const *>(cmd.data()),
                   const_cast<char *const *>(env.data()));
 
         // If execvpe returns, it failed.
@@ -456,50 +463,52 @@ static int execute_command(const CStringArray &cmd,
 
 // ── command output collection ───────────────────────────────────────────────
 
-/// Recursively copy `src` into `dest_root`, preserving relative directory
-/// structure (analogous to `cp --parents -r src dest_root`).
+/// Copy `src` (on-disk path, relative to cwd) into `dest_root / output_path`.
 ///
-///   copy_with_parents("build/lib", "/nix/store/…/outputs")
-///     → copies build/lib/… to /nix/store/…/outputs/build/lib/…
+/// `src` is used to locate the file on disk; `output_path` determines
+/// the directory structure under `dest_root`.
+///
+///   copy_with_parents("../../foo.o", "a/foo.o", "$out/outputs")
+///     → copies ../../foo.o to $out/outputs/a/foo.o
 ///
 /// Missing source files are silently skipped — the command may not have
 /// produced all declared outputs.  Actual copy errors are fatal.
-static void copy_with_parents(const fs::path &src,
+static void copy_with_parents(const fs::path &src, const fs::path &output_path,
                               const fs::path &dest_root) {
     std::error_code ec;
 
     if (!fs::exists(src, ec)) {
         // Missing output — just skip. Not ours to deal with.
-        // It pertains to the consumer to know what to do with that (fail, restry, etc.)
+        // It pertains to the consumer to know what to do with that (fail,
+        // restry, etc.)
         return;
     }
 
-    fs::path dest = dest_root / src;
+    fs::path dest = dest_root / output_path;
 
     if (fs::is_directory(src, ec)) {
         fs::create_directories(dest, ec);
         if (ec) {
-            die("cannot create output destination directory '"
-                + dest.string() + "': " + ec.message());
+            die("cannot create output destination directory '" + dest.string() +
+                "': " + ec.message());
         }
         fs::copy(src, dest,
-                 fs::copy_options::recursive |
-                     fs::copy_options::copy_symlinks,
+                 fs::copy_options::recursive | fs::copy_options::copy_symlinks,
                  ec);
         if (ec) {
-            die("cannot copy output directory '" + src.string()
-                + "' -> '" + dest.string() + "': " + ec.message());
+            die("cannot copy output directory '" + src.string() + "' -> '" +
+                dest.string() + "': " + ec.message());
         }
     } else {
         fs::create_directories(dest.parent_path(), ec);
         if (ec) {
-            die("cannot create parent for output file '"
-                + dest.string() + "': " + ec.message());
+            die("cannot create parent for output file '" + dest.string() +
+                "': " + ec.message());
         }
         fs::copy_file(src, dest, fs::copy_options::none, ec);
         if (ec) {
-            die("cannot copy output file '" + src.string()
-                + "' -> '" + dest.string() + "': " + ec.message());
+            die("cannot copy output file '" + src.string() + "' -> '" +
+                dest.string() + "': " + ec.message());
         }
     }
 }
@@ -513,27 +522,49 @@ static void copy_with_parents(const fs::path &src,
 /// So when `output_paths` is present and non-empty we use it exclusively;
 /// otherwise we fall back to the deprecated `output_files` +
 /// `output_directories` fields.
-static void collect_command_outputs(const json &manifest, const fs::path &out_dir) {
+static void collect_command_outputs(const json &manifest,
+                                    const fs::path &out_dir,
+                                    const fs::path &working_directory) {
     const fs::path outputs_dir = out_dir / "outputs";
 
-    bool has_output_paths = manifest.contains("output_paths")
-                            && !manifest["output_paths"].empty();
+    // Resolve an output path (which is relative to the working directory)
+    // into:
+    //   src  — on-disk path (relative to cwd, usable as-is since we
+    //          already chdir'd into the working directory)
+    //   dest — normalized path under $out/outputs/
+    //
+    // Example: working_directory = "a/b/c", output = "../../foo.o"
+    //   → normalized = (a/b/c / ../../foo.o).lexically_normal() = "a/foo.o"
+    //   → src  = "../../foo.o"  (the command wrote it relative to cwd)
+    //   → dest = $out/outputs/a/foo.o
+    auto collect_one = [&](const std::string &raw_path) {
+        fs::path src(raw_path);
+        // Resolve the output path relative to working_directory, then
+        // normalize away any ".." components so the destination stays
+        // inside $out/outputs/.
+        fs::path normalized =
+            (fs::path(working_directory) / raw_path).lexically_normal();
+        copy_with_parents(src, normalized, outputs_dir);
+    };
+
+    bool has_output_paths =
+        manifest.contains("output_paths") && !manifest["output_paths"].empty();
 
     if (has_output_paths) {
         // v2.1+: unified output_paths supersedes the legacy fields.
         for (const auto &p : manifest["output_paths"]) {
-            copy_with_parents(fs::path(p.get<std::string>()), outputs_dir);
+            collect_one(p.get<std::string>());
         }
     } else {
         // Legacy: separate output_files and output_directories.
         if (manifest.contains("output_directories")) {
             for (const auto &d : manifest["output_directories"]) {
-                copy_with_parents(fs::path(d.get<std::string>()), outputs_dir);
+                collect_one(d.get<std::string>());
             }
         }
         if (manifest.contains("output_files")) {
             for (const auto &f : manifest["output_files"]) {
-                copy_with_parents(fs::path(f.get<std::string>()), outputs_dir);
+                collect_one(f.get<std::string>());
             }
         }
     }
@@ -545,6 +576,7 @@ int main() {
     // 1. Read manifest and $out.
     json manifest = read_manifest();
     fs::path out_dir = get_out_dir();
+    fs::path working_directory = get_working_directory(manifest);
 
     // 2. Copy input files from the Nix store into the build sandbox.
     copy_inputs(manifest);
@@ -552,7 +584,7 @@ int main() {
 
     // 3. Set up working directory, pre-create command output dirs,
     //    and create the execution-result directory.
-    setup_working_directory(manifest);
+    setup_working_directory(working_directory);
     prepare_command_outputs(manifest);
     create_result_dir(out_dir);
 
@@ -568,7 +600,7 @@ int main() {
 
     // 6. Collect declared command outputs into $out/outputs/.
     //    Missing outputs are silently skipped.
-    collect_command_outputs(manifest, out_dir);
+    collect_command_outputs(manifest, out_dir, working_directory);
     print_tree(out_dir);
 
     // The runner itself always exits 0.  The action's real exit code is
