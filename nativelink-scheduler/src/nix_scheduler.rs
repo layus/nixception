@@ -20,7 +20,7 @@ use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use parking_lot::RwLock;
 
 use crate::nix_stats::NixceptionStats;
-use crate::nix_worker::ScanCache;
+use crate::nix_worker::{PathInfoCache, ScanCache};
 
 use async_trait::async_trait;
 use futures::Future;
@@ -105,6 +105,10 @@ pub struct NixScheduler<
     /// value) across actions.
     scan_cache: ScanCache,
 
+    /// Shared cache of resolved path-info results.  Avoids redundant
+    /// `query_path_info` daemon calls across actions.
+    path_info_cache: PathInfoCache,
+
     /// Weak self-reference so we can pass `Arc<dyn WorkerScheduler>` to
     /// spawned [`NixWorker`] instances from `&self`.
     self_ref: OnceLock<Weak<dyn WorkerScheduler>>,
@@ -179,6 +183,7 @@ impl<
 
         let stats = Arc::new(NixceptionStats::default());
         let scan_cache: ScanCache = Arc::new(RwLock::new(HashMap::new()));
+        let path_info_cache: PathInfoCache = Arc::new(RwLock::new(HashMap::new()));
 
         let scheduler = Arc::new(Self {
             platform_property_manager,
@@ -189,6 +194,7 @@ impl<
             nix_connection,
             stats,
             scan_cache,
+            path_info_cache,
             self_ref: OnceLock::new(),
         });
 
@@ -251,6 +257,7 @@ impl<
             self.runner_info.clone(),
             self.stats.clone(),
             self.scan_cache.clone(),
+            self.path_info_cache.clone(),
         );
         tokio::spawn(worker.run());
 

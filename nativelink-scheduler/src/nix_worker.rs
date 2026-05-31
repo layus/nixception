@@ -188,6 +188,30 @@ fn scan_nix_store_paths_in_strings<'a>(
 /// input file.
 pub(crate) type ScanCache = Arc<RwLock<HashMap<String, BTreeSet<StorePath<String>>>>>;
 
+/// Cached result of resolving a discovered store path via the Nix daemon.
+///
+/// `None` means the path was queried but has no deriver (source-only path)
+/// or the daemon returned no info.  `Some(…)` contains the resolved
+/// derivation and its hash_derivation_modulo.
+#[derive(Clone, Debug)]
+pub(crate) enum PathInfoCacheEntry {
+    /// Path is valid but has no deriver — should be added as input source.
+    Source,
+    /// Path's deriver was resolved successfully.
+    Resolved {
+        drv_store_path: StorePath<String>,
+        output_name: String,
+        hash_derivation_modulo: [u8; 32],
+    },
+    /// Path was queried but is not valid in the store, or query failed.
+    NotFound,
+}
+
+/// A concurrent cache mapping store path strings to their resolved
+/// path-info results.  Shared across all [`NixWorker`] instances to
+/// avoid redundant `query_path_info` + `.drv` read operations.
+pub(crate) type PathInfoCache = Arc<RwLock<HashMap<String, PathInfoCacheEntry>>>;
+
 /// A worker that executes a single action end-to-end, reporting every state
 /// transition back to the scheduler through the [`WorkerStateManager`].
 ///
@@ -214,6 +238,9 @@ pub(crate) struct NixWorker {
     /// repeated CAS reads and scanning of identical input files across
     /// actions.
     scan_cache: ScanCache,
+    /// Shared cache of resolved path-info results, avoiding redundant
+    /// `query_path_info` daemon calls across actions.
+    path_info_cache: PathInfoCache,
 }
 
 impl NixWorker {
@@ -227,6 +254,7 @@ impl NixWorker {
         runner_info: Arc<RunnerInfo>,
         stats: Arc<NixceptionStats>,
         scan_cache: ScanCache,
+        path_info_cache: PathInfoCache,
     ) -> Self {
         Self {
             worker_scheduler,
@@ -238,6 +266,7 @@ impl NixWorker {
             runner_info,
             stats,
             scan_cache,
+            path_info_cache,
         }
     }
 
@@ -273,10 +302,10 @@ impl NixWorker {
                     entry.path.display()
                 )
             })?;
-
-        let paths = scan_nix_store_paths(&content);
         self.stats
             .record(&self.stats.scan_cas_read_us, cas_start.elapsed());
+
+        let paths = scan_nix_store_paths(&content);
         self.scan_cache.write().insert(cache_key, paths.clone());
         Ok(paths)
     }
@@ -577,7 +606,34 @@ impl NixWorker {
 
             let abs_path = sp.to_absolute_path();
 
-            // Query the Nix daemon for path info.
+            // ── Check the shared path-info cache first ───────────────
+            if let Some(cached) = self.path_info_cache.read().get(&abs_path) {
+                self.stats.increment(&self.stats.path_info_cache_hits);
+                match cached {
+                    PathInfoCacheEntry::Source => {
+                        extra_sources.push(sp.clone());
+                    }
+                    PathInfoCacheEntry::Resolved {
+                        drv_store_path,
+                        output_name,
+                        hash_derivation_modulo,
+                    } => {
+                        let drv_abs = drv_store_path.to_absolute_path();
+                        if seen_drvs.insert(drv_abs.clone()) {
+                            hash_cache.insert(drv_abs, *hash_derivation_modulo);
+                            resolved_drvs.push(ResolvedInputDrv {
+                                drv_store_path: drv_store_path.clone(),
+                                output_name: output_name.clone(),
+                            });
+                        }
+                    }
+                    PathInfoCacheEntry::NotFound => {}
+                }
+                continue;
+            }
+
+            // ── Cache miss — query the Nix daemon ────────────────────
+            self.stats.increment(&self.stats.path_info_cache_misses);
             self.stats.increment(&self.stats.query_path_info_count);
             let path_info = match self.connection.query_path_info(&abs_path).await {
                 Ok(Some(info)) => info,
@@ -587,6 +643,9 @@ impl NixWorker {
                         store_path = %abs_path,
                         "Discovered store path is not valid in the store, skipping"
                     );
+                    self.path_info_cache
+                        .write()
+                        .insert(abs_path, PathInfoCacheEntry::NotFound);
                     continue;
                 }
                 Err(e) => {
@@ -596,6 +655,7 @@ impl NixWorker {
                         error = ?e,
                         "Failed to query path info for discovered store path, skipping"
                     );
+                    // Don't cache errors — they may be transient.
                     continue;
                 }
             };
@@ -611,6 +671,9 @@ impl NixWorker {
                     store_path = %abs_path,
                     "No deriver for discovered store path, adding as input source"
                 );
+                self.path_info_cache
+                    .write()
+                    .insert(abs_path, PathInfoCacheEntry::Source);
                 extra_sources.push(sp.clone());
                 continue;
             }
@@ -643,6 +706,9 @@ impl NixWorker {
                             error = %e,
                             "Bad deriver path for discovered store path, skipping"
                         );
+                        self.path_info_cache
+                            .write()
+                            .insert(abs_path, PathInfoCacheEntry::NotFound);
                         continue;
                     }
                 };
@@ -663,6 +729,9 @@ impl NixWorker {
                         "Deriver .drv not found in store (may have been \
                          garbage-collected), skipping"
                     );
+                    self.path_info_cache
+                        .write()
+                        .insert(abs_path, PathInfoCacheEntry::NotFound);
                     continue;
                 }
             };
@@ -676,6 +745,9 @@ impl NixWorker {
                         error = ?e,
                         "Failed to parse deriver .drv, skipping"
                     );
+                    self.path_info_cache
+                        .write()
+                        .insert(abs_path, PathInfoCacheEntry::NotFound);
                     continue;
                 }
             };
@@ -702,7 +774,17 @@ impl NixWorker {
             // inserted into hash_cache as a side effect; we don't need
             // it here.
             match compute_hash_derivation_modulo(&drv_abs_path, hash_cache) {
-                Ok(_hash) => {}
+                Ok(hash) => {
+                    // Cache the successful resolution for other workers.
+                    self.path_info_cache.write().insert(
+                        abs_path.clone(),
+                        PathInfoCacheEntry::Resolved {
+                            drv_store_path: drv_store_path.clone(),
+                            output_name: output_name.clone(),
+                            hash_derivation_modulo: hash,
+                        },
+                    );
+                }
                 Err(e) => {
                     event!(
                         Level::WARN,
@@ -712,6 +794,9 @@ impl NixWorker {
                         "Failed to compute hash_derivation_modulo for \
                          deriver, skipping"
                     );
+                    self.path_info_cache
+                        .write()
+                        .insert(abs_path, PathInfoCacheEntry::NotFound);
                     continue;
                 }
             }
@@ -738,8 +823,8 @@ impl NixWorker {
     ///  2. Build a Nix derivation from the inputs
     ///  3. Upload the derivation to the Nix store
     ///
-    /// Returns a tuple of (derivation store path, output store path) on
-    /// success.
+    /// Returns a tuple of (derivation store path, output store path,
+    /// working directory) on success.
     async fn prepare_derivation(&self) -> Result<(StorePath<String>, String, String), Error> {
         let cas_fetch_start = Instant::now();
         let command = get_and_decode_digest::<ProtoCommand>(
@@ -810,12 +895,12 @@ impl NixWorker {
         // We seed the hash cache with the runner's hash so it is never
         // re-read from disk.
         let ri = &self.runner_info;
-        let resolve_start = Instant::now();
         let mut hash_cache: HashMap<String, [u8; 32]> = HashMap::from([(
             ri.drv_store_path.to_absolute_path(),
             ri.hash_derivation_modulo,
         )]);
 
+        let resolve_start = Instant::now();
         let (resolved_drvs, extra_sources) = self
             .resolve_discovered_store_paths(
                 &discovered_store_paths,
@@ -846,9 +931,6 @@ impl NixWorker {
             );
         }
 
-        let command_working_directory = command.working_directory.clone();
-
-        let manifest_start = Instant::now();
         // ── Build the JSON manifest ────────────────────────────────────
         //
         // The manifest is passed to the builder via Nix's passAsFile
@@ -857,6 +939,9 @@ impl NixWorker {
         //   manifest   = <JSON>
         // and the Nix daemon writes the JSON to a temporary file, setting
         // $manifestPath in the builder's environment.
+        let command_working_directory = command.working_directory.clone();
+
+        let manifest_start = Instant::now();
         let manifest = json!({
             "inputs": entries.iter().map(|e| {
                 json!({
