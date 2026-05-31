@@ -38,6 +38,7 @@ use nix_compat::store_path::build_ca_path;
 use nix_remote::StorePathSet;
 
 use tokio::io::AsyncReadExt;
+use tracing::{event, Level};
 
 use crate::nix_daemon_connection::NixDaemonConnectionPool;
 
@@ -155,6 +156,9 @@ impl StoreDriver for NixStore {
         upload_size: UploadSizeInfo,
     ) -> Result<(), Error> {
         let nix_ca = key_to_ca(&digest)?.to_nix_nixbase32_string();
+        let expected_store_path = key_to_store_path(&digest)
+            .map(|sp| sp.to_absolute_path())
+            .unwrap_or_else(|_| "<unknown>".to_string());
 
         let total_size: usize = match upload_size {
             UploadSizeInfo::ExactSize(size) => size
@@ -166,25 +170,102 @@ impl StoreDriver for NixStore {
             )),
         }?;
 
+        // Check if the path already exists before uploading.
+        let exists_before = self
+            .connection
+            .query_path_info(&expected_store_path)
+            .await
+            .map(|info| info.is_some())
+            .unwrap_or(false);
+        let exists_on_disk_before = Path::new(&expected_store_path).exists();
+
+        event!(
+            Level::INFO,
+            store_path = %expected_store_path,
+            ca = %nix_ca,
+            size = total_size,
+            exists_before,
+            exists_on_disk_before,
+            "NixStore::update – uploading to nix daemon"
+        );
+
         let refs = StorePathSet { paths: vec![] };
 
-        let reply = self
+        let upload_result = self
             .connection
             .upload_to_nix_daemon("reapi-adapted", &nix_ca, refs, reader, total_size)
-            .await?;
+            .await;
 
-        // Write to nix store was successful, but we need to check that the
-        // content matches the digest in the key. We do not support arbitrary
-        // keys, only sh256 digests of the content.
-        let () = (reply.info.content_address.to_string().unwrap() == nix_ca)
-            .then_some(())
-            .ok_or(make_err!(
-                Code::InvalidArgument,
-                "Key {:?} does not match the content.",
-                &digest
-            ))?;
+        match upload_result {
+            Ok(reply) => {
+                // Write to nix store was successful, but we need to check that the
+                // content matches the digest in the key. We do not support arbitrary
+                // keys, only sh256 digests of the content.
+                let () = (reply.info.content_address.to_string().unwrap() == nix_ca)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        let err = make_err!(
+                            Code::InvalidArgument,
+                            "Key {:?} does not match the content. expected ca={}, got ca={:?}, store_path={}",
+                            &digest,
+                            nix_ca,
+                            reply.info.content_address.to_string(),
+                            expected_store_path
+                        );
+                        event!(
+                            Level::ERROR,
+                            store_path = %expected_store_path,
+                            expected_ca = %nix_ca,
+                            actual_ca = ?reply.info.content_address.to_string(),
+                            "NixStore::update – content-address mismatch"
+                        );
+                        err
+                    })?;
+                Ok(())
+            }
+            Err(e) => {
+                // Check if the path exists after the failed upload.
+                let exists_after = self
+                    .connection
+                    .query_path_info(&expected_store_path)
+                    .await
+                    .map(|info| info.is_some())
+                    .unwrap_or(false);
+                let exists_on_disk_after = Path::new(&expected_store_path).exists();
 
-        Ok(())
+                if exists_after || exists_on_disk_after {
+                    // TEMPORARY: tolerate the error if the path exists in the
+                    // store — the content is already available.
+                    event!(
+                        Level::WARN,
+                        store_path = %expected_store_path,
+                        ca = %nix_ca,
+                        size = total_size,
+                        exists_before,
+                        exists_on_disk_before,
+                        exists_after,
+                        exists_on_disk_after,
+                        error = %e,
+                        "NixStore::update – upload failed but path exists, ignoring"
+                    );
+                    Ok(())
+                } else {
+                    event!(
+                        Level::ERROR,
+                        store_path = %expected_store_path,
+                        ca = %nix_ca,
+                        size = total_size,
+                        exists_before,
+                        exists_on_disk_before,
+                        exists_after,
+                        exists_on_disk_after,
+                        error = %e,
+                        "NixStore::update – upload failed and path does not exist"
+                    );
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn get_part(

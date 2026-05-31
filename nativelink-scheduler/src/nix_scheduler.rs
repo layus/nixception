@@ -371,8 +371,9 @@ impl<
     }
 
     async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
+        let daemon_wait = self.nix_connection.cumulative_sem_wait_us();
         self.stats.log_summary();
-        self.stats.write_summary_file();
+        self.stats.write_summary_file_with_daemon_wait(daemon_wait);
     }
 }
 

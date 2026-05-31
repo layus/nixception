@@ -94,6 +94,70 @@ pub struct NixceptionStats {
     /// Total wall-clock time of `run_inner` (end-to-end per action).
     #[metric(help = "Cumulative total action wall-clock time (us)")]
     pub total_action_us: AtomicU64,
+
+    // ── Fine-grained sub-step counters ──────────────────────────────
+    //
+    // These break down the coarse cost centers above to pinpoint
+    // contention and resource-wait time.
+
+    /// Time spent waiting for a Nix daemon connection (semaphore acquire).
+    /// High values indicate connection pool contention.
+    #[metric(help = "Cumulative time waiting for daemon connection (us)")]
+    pub daemon_acquire_wait_us: AtomicU64,
+
+    /// Number of scan cache hits (file already scanned by another action).
+    #[metric(help = "Number of scan cache hits")]
+    pub scan_cache_hits: AtomicU64,
+
+    /// Number of scan cache misses (file had to be read from CAS).
+    #[metric(help = "Number of scan cache misses")]
+    pub scan_cache_misses: AtomicU64,
+
+    /// Time spent reading files from CAS during store-path scanning.
+    #[metric(help = "Cumulative CAS read time during scanning (us)")]
+    pub scan_cas_read_us: AtomicU64,
+
+    /// Time spent fetching Command and Directory protos from CAS
+    /// (at the start of prepare_derivation, before scanning).
+    #[metric(help = "Cumulative CAS proto fetch time (us)")]
+    pub cas_proto_fetch_us: AtomicU64,
+
+    /// Time spent in unfold() walking the input directory tree.
+    #[metric(help = "Cumulative input tree unfold time (us)")]
+    pub unfold_us: AtomicU64,
+
+    /// Time spent querying the Nix daemon for path info during
+    /// resolve_discovered_store_paths.
+    #[metric(help = "Cumulative query_path_info time (us)")]
+    pub query_path_info_us: AtomicU64,
+
+    /// Number of query_path_info calls made to the daemon.
+    #[metric(help = "Number of query_path_info calls")]
+    pub query_path_info_count: AtomicU64,
+
+    /// Time spent building the JSON manifest and computing
+    /// derivation hashes (after scanning, before upload).
+    #[metric(help = "Cumulative manifest+hash computation time (us)")]
+    pub manifest_and_hash_us: AtomicU64,
+
+    /// Time spent reading exitcode/stdout/stderr files from the
+    /// output directory during output collection.
+    #[metric(help = "Cumulative output file read time (us)")]
+    pub output_read_us: AtomicU64,
+
+    /// Time spent uploading output files to CAS during output
+    /// collection.
+    #[metric(help = "Cumulative output CAS upload time (us)")]
+    pub output_upload_us: AtomicU64,
+
+    /// Number of path-info cache hits (store path already resolved by
+    /// another action).
+    #[metric(help = "Number of path-info cache hits")]
+    pub path_info_cache_hits: AtomicU64,
+
+    /// Number of path-info cache misses (had to query the daemon).
+    #[metric(help = "Number of path-info cache misses")]
+    pub path_info_cache_misses: AtomicU64,
 }
 
 impl NixceptionStats {
@@ -157,6 +221,17 @@ impl NixceptionStats {
     ///
     /// Returns `None` when no actions were executed.
     pub fn format_summary(&self) -> Option<String> {
+        self.format_summary_with_daemon_wait(0)
+    }
+
+    /// Build a human-readable summary including sub-step breakdowns.
+    ///
+    /// `daemon_sem_wait_us` is the cumulative semaphore wait time from
+    /// the [`NixDaemonConnectionPool`]; pass 0 if unavailable.
+    pub fn format_summary_with_daemon_wait(
+        &self,
+        daemon_sem_wait_us: u64,
+    ) -> Option<String> {
         let actions = self.actions_total.load(Ordering::Relaxed);
         if actions == 0 {
             return None;
@@ -172,6 +247,22 @@ impl NixceptionStats {
         let exec = Duration::from_micros(self.execute_us.load(Ordering::Relaxed));
         let collect = Duration::from_micros(self.collect_outputs_us.load(Ordering::Relaxed));
         let overhead = total.saturating_sub(exec);
+
+        // Sub-step durations
+        let cas_proto = Duration::from_micros(self.cas_proto_fetch_us.load(Ordering::Relaxed));
+        let unfold = Duration::from_micros(self.unfold_us.load(Ordering::Relaxed));
+        let scan_cas = Duration::from_micros(self.scan_cas_read_us.load(Ordering::Relaxed));
+        let qpi = Duration::from_micros(self.query_path_info_us.load(Ordering::Relaxed));
+        let manifest_hash = Duration::from_micros(self.manifest_and_hash_us.load(Ordering::Relaxed));
+        let out_read = Duration::from_micros(self.output_read_us.load(Ordering::Relaxed));
+        let out_upload = Duration::from_micros(self.output_upload_us.load(Ordering::Relaxed));
+        let daemon_wait = Duration::from_micros(daemon_sem_wait_us);
+
+        let cache_hits = self.scan_cache_hits.load(Ordering::Relaxed);
+        let cache_misses = self.scan_cache_misses.load(Ordering::Relaxed);
+        let qpi_count = self.query_path_info_count.load(Ordering::Relaxed);
+        let pi_cache_hits = self.path_info_cache_hits.load(Ordering::Relaxed);
+        let pi_cache_misses = self.path_info_cache_misses.load(Ordering::Relaxed);
 
         let exec_pct = if total.as_nanos() > 0 {
             exec.as_secs_f64() / total.as_secs_f64() * 100.0
@@ -189,7 +280,7 @@ impl NixceptionStats {
             }
         };
 
-        let mut s = String::with_capacity(512);
+        let mut s = String::with_capacity(1024);
         let _ = writeln!(s);
         let _ = writeln!(
             s,
@@ -251,6 +342,81 @@ impl NixceptionStats {
             fmt_dur(overhead),
             overhead_pct
         );
+
+        // Sub-step breakdown
+        let _ = writeln!(s);
+        let _ = writeln!(s, "  Sub-step breakdown:");
+        let _ = writeln!(s, "  {}", "─".repeat(60));
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "CAS proto fetch",
+            fmt_dur(cas_proto),
+            avg(cas_proto)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "Input tree unfold",
+            fmt_dur(unfold),
+            avg(unfold)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "Scan CAS reads",
+            fmt_dur(scan_cas),
+            avg(scan_cas)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} hits, {} misses",
+            "Scan cache",
+            cache_hits,
+            cache_misses,
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg, {} calls)",
+            "query_path_info",
+            fmt_dur(qpi),
+            avg(qpi),
+            qpi_count,
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} hits, {} misses",
+            "Path-info cache",
+            pi_cache_hits,
+            pi_cache_misses,
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "Manifest + hash",
+            fmt_dur(manifest_hash),
+            avg(manifest_hash)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "Output read+stdout/stderr",
+            fmt_dur(out_read),
+            avg(out_read)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {} ({:>7.1} ms avg)",
+            "Output CAS upload",
+            fmt_dur(out_upload),
+            avg(out_upload)
+        );
+        let _ = writeln!(
+            s,
+            "    {:.<28} {}",
+            "Daemon semaphore wait",
+            fmt_dur(daemon_wait),
+        );
         let _ = writeln!(s);
 
         Some(s)
@@ -263,6 +429,12 @@ impl NixceptionStats {
     /// unset.  Errors are logged but not propagated — stats output
     /// must never fail the build.
     pub fn write_summary_file(&self) {
+        self.write_summary_file_with_daemon_wait(0);
+    }
+
+    /// Like [`write_summary_file`] but includes daemon semaphore wait
+    /// time in the sub-step breakdown.
+    pub fn write_summary_file_with_daemon_wait(&self, daemon_sem_wait_us: u64) {
         let path = match std::env::var("NIXCEPTION_STATS_FILE") {
             Ok(p) if !p.is_empty() => p,
             _ => {
@@ -271,7 +443,7 @@ impl NixceptionStats {
             }
         };
 
-        let content = match self.format_summary() {
+        let content = match self.format_summary_with_daemon_wait(daemon_sem_wait_us) {
             Some(s) => s,
             None => "Nixception: no actions were executed.\n".to_string(),
         };

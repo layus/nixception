@@ -255,10 +255,14 @@ impl NixWorker {
 
         // Fast path: check if we already scanned this file.
         if let Some(cached) = self.scan_cache.read().get(&cache_key) {
+            self.stats.increment(&self.stats.scan_cache_hits);
             return Ok(cached.clone());
         }
 
+        self.stats.increment(&self.stats.scan_cache_misses);
+
         // Slow path: read from CAS, scan, and cache.
+        let cas_start = Instant::now();
         let content = self
             .cas_store
             .get_part_unchunked(StoreKey::Digest(entry.digest), 0, None)
@@ -271,6 +275,8 @@ impl NixWorker {
             })?;
 
         let paths = scan_nix_store_paths(&content);
+        self.stats
+            .record(&self.stats.scan_cas_read_us, cas_start.elapsed());
         self.scan_cache.write().insert(cache_key, paths.clone());
         Ok(paths)
     }
@@ -482,6 +488,7 @@ impl NixWorker {
         working_directory: &str,
     ) -> Result<nativelink_util::action_messages::ActionResult, Error> {
         // Read the exit code produced by the script.
+        let read_start = Instant::now();
         let exit_code: i32 = tokio::fs::read_to_string(out_dir.join("exitcode"))
             .await
             .map_err(|e| make_err!(Code::Internal, "Failed to read exitcode: {}", e))?
@@ -498,6 +505,8 @@ impl NixWorker {
             .upload_file_to_cas(&out_dir.join("stderr"))
             .await
             .err_tip(|| "Uploading stderr to CAS")?;
+        self.stats
+            .record(&self.stats.output_read_us, read_start.elapsed());
 
         // Walk $out/outputs/ and collect FileInfo entries.
         // The runner stores outputs under $out/outputs/<working_directory>/…
@@ -508,10 +517,13 @@ impl NixWorker {
         // outside it get appropriate ../../… prefixes.
         let outputs_dir = out_dir.join("outputs");
         let relative_to = outputs_dir.join(working_directory);
+        let upload_start = Instant::now();
         let output_files = self
             .collect_output_files(&outputs_dir, &relative_to)
             .await
             .err_tip(|| format!("Collecting output files from {}", outputs_dir.display()))?;
+        self.stats
+            .record(&self.stats.output_upload_us, upload_start.elapsed());
 
         event!(
             Level::INFO,
@@ -566,6 +578,7 @@ impl NixWorker {
             let abs_path = sp.to_absolute_path();
 
             // Query the Nix daemon for path info.
+            self.stats.increment(&self.stats.query_path_info_count);
             let path_info = match self.connection.query_path_info(&abs_path).await {
                 Ok(Some(info)) => info,
                 Ok(None) => {
@@ -728,15 +741,17 @@ impl NixWorker {
     /// Returns a tuple of (derivation store path, output store path) on
     /// success.
     async fn prepare_derivation(&self) -> Result<(StorePath<String>, String, String), Error> {
+        let cas_fetch_start = Instant::now();
         let command = get_and_decode_digest::<ProtoCommand>(
             &self.cas_store,
             self.action_info.command_digest.into(),
         )
         .await
         .err_tip(|| "Converting command_digest to Command")?;
+        self.stats
+            .record(&self.stats.cas_proto_fetch_us, cas_fetch_start.elapsed());
 
-        let command_working_directory = command.working_directory.clone();
-
+        let unfold_start = Instant::now();
         let mut entries: Vec<PathEntry> = Vec::new();
         self.unfold(
             "./".into(),
@@ -745,6 +760,8 @@ impl NixWorker {
         )
         .await
         .err_tip(|| "Converting digest to Directory")?;
+        self.stats
+            .record(&self.stats.unfold_us, unfold_start.elapsed());
 
         // ── Discover Nix store paths referenced by the action ───────────
         //
@@ -793,6 +810,7 @@ impl NixWorker {
         // We seed the hash cache with the runner's hash so it is never
         // re-read from disk.
         let ri = &self.runner_info;
+        let resolve_start = Instant::now();
         let mut hash_cache: HashMap<String, [u8; 32]> = HashMap::from([(
             ri.drv_store_path.to_absolute_path(),
             ri.hash_derivation_modulo,
@@ -806,6 +824,8 @@ impl NixWorker {
             )
             .await
             .err_tip(|| "Resolving discovered store paths")?;
+        self.stats
+            .record(&self.stats.query_path_info_us, resolve_start.elapsed());
 
         let scan_elapsed = scan_start.elapsed();
         self.stats
@@ -826,6 +846,9 @@ impl NixWorker {
             );
         }
 
+        let command_working_directory = command.working_directory.clone();
+
+        let manifest_start = Instant::now();
         // ── Build the JSON manifest ────────────────────────────────────
         //
         // The manifest is passed to the builder via Nix's passAsFile
@@ -938,6 +961,9 @@ impl NixWorker {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+
+        self.stats
+            .record(&self.stats.manifest_and_hash_us, manifest_start.elapsed());
 
         // Cost center: upload derivation to the Nix store.
         let upload_start = Instant::now();

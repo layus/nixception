@@ -41,6 +41,8 @@ use nix_remote::{DerivedPath, StorePathSet, ValidPathInfoWithPath};
 use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::async_nix_conn::AsyncNixConn;
 
 /// Default maximum number of pooled connections.
@@ -90,6 +92,10 @@ pub struct NixDaemonConnectionPool {
     semaphore: Semaphore,
     /// Idle, ready-to-use connections.
     idle: Mutex<Vec<IdleConn>>,
+    /// Cumulative time (microseconds) spent waiting for a semaphore
+    /// permit across all `acquire()` calls.  High values indicate
+    /// connection pool contention.
+    cumulative_sem_wait_us: AtomicU64,
 }
 
 impl std::fmt::Debug for NixDaemonConnectionPool {
@@ -110,6 +116,7 @@ impl NixDaemonConnectionPool {
             socket_path,
             semaphore: Semaphore::new(max_connections),
             idle: Mutex::new(Vec::with_capacity(max_connections)),
+            cumulative_sem_wait_us: AtomicU64::new(0),
         });
 
         // Spawn a lightweight background task that drops idle
@@ -205,6 +212,13 @@ impl NixDaemonConnectionPool {
         let (_permit, mut checked_out) = self.acquire().await?;
         let conn = &mut checked_out.conn;
 
+        tracing::debug!(
+            name = %name,
+            ca = %cam_str,
+            size = upload_size,
+            "upload_to_nix_daemon – starting AddToStore"
+        );
+
         let result = async {
             let add_to_store_op = AddToStore {
                 name: nix_remote::StorePath(name.to_string().into()),
@@ -242,10 +256,25 @@ impl NixDaemonConnectionPool {
 
         match result {
             Ok(val) => {
+                tracing::debug!(
+                    name = %name,
+                    ca = %cam_str,
+                    result_path = ?val.path.0,
+                    "upload_to_nix_daemon – success"
+                );
                 self.release(checked_out).await;
                 Ok(val)
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                tracing::error!(
+                    name = %name,
+                    ca = %cam_str,
+                    size = upload_size,
+                    error = %e,
+                    "upload_to_nix_daemon – failed"
+                );
+                Err(e)
+            }
         }
     }
 
@@ -365,6 +394,13 @@ impl NixDaemonConnectionPool {
     // Internal helpers
     // -------------------------------------------------------------------
 
+    /// Return the cumulative time (microseconds) spent waiting for
+    /// semaphore permits.  Useful for diagnosing connection pool
+    /// contention.
+    pub fn cumulative_sem_wait_us(&self) -> u64 {
+        self.cumulative_sem_wait_us.load(Ordering::Relaxed)
+    }
+
     /// Acquire a connection from the pool.
     ///
     /// Waits for a semaphore permit (which bounds the total number of
@@ -376,11 +412,14 @@ impl NixDaemonConnectionPool {
     /// that the connection slot is free (whether the connection was
     /// returned to the pool or discarded).
     async fn acquire(&self) -> Result<(SemaphorePermit<'_>, CheckedOutConn), Error> {
+        let sem_start = std::time::Instant::now();
         let permit = self
             .semaphore
             .acquire()
             .await
             .map_err(|_| make_err!(Code::Internal, "Connection pool semaphore closed"))?;
+        self.cumulative_sem_wait_us
+            .fetch_add(sem_start.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         let mut idle = self.idle.lock().await;
         let conn = if let Some(entry) = idle.pop() {
