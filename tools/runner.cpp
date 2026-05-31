@@ -580,7 +580,7 @@ int main() {
 
     // 2. Copy input files from the Nix store into the build sandbox.
     copy_inputs(manifest);
-    print_tree(".");
+    //print_tree(".");
 
     // 3. Set up working directory, pre-create command output dirs,
     //    and create the execution-result directory.
@@ -596,12 +596,12 @@ int main() {
     //    $out/exitcode; the runner itself only fails on infrastructure
     //    errors, not on command failure.
     execute_command(cmd, env, out_dir);
-    print_tree(".");
+    //print_tree(".");
 
     // 6. Collect declared command outputs into $out/outputs/.
     //    Missing outputs are silently skipped.
     collect_command_outputs(manifest, out_dir, working_directory);
-    print_tree(out_dir);
+    //print_tree(out_dir);
 
     // The runner itself always exits 0.  The action's real exit code is
     // recorded in $out/exitcode and interpreted by nixception's

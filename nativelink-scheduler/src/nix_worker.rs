@@ -18,6 +18,53 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Extension trait for [`Path`] that adds a `relative_to` method,
+/// mirroring the unstable `std::path::Path::relative_to`.
+trait PathExt {
+    /// Compute a relative path from `base` to `self`.
+    ///
+    /// Both paths must be absolute.  If `self` is inside `base` the
+    /// result is a simple relative path; otherwise appropriate `../`
+    /// components are prepended.
+    ///
+    /// ```text
+    /// Path::new("/a/b/c/foo.o").relative_to("/a/b")
+    ///   => "c/foo.o"
+    /// Path::new("/a/foo.o").relative_to("/a/b/c")
+    ///   => "../../foo.o"
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This is only meaningful on Unix where all absolute paths share
+    /// the root `/`.  It will produce nonsensical results if either
+    /// path is relative.
+    fn relative_to(&self, base: &Path) -> PathBuf;
+}
+
+impl PathExt for Path {
+    fn relative_to(&self, base: &Path) -> PathBuf {
+        debug_assert!(self.is_absolute(), "relative_to: self must be absolute, got {:?}", self);
+        debug_assert!(base.is_absolute(), "relative_to: base must be absolute, got {:?}", base);
+        let self_components: Vec<_> = self.components().collect();
+        let base_components: Vec<_> = base.components().collect();
+        let common = self_components
+            .iter()
+            .zip(base_components.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let ups = base_components.len() - common;
+        let mut result = PathBuf::new();
+        for _ in 0..ups {
+            result.push("..");
+        }
+        for comp in &self_components[common..] {
+            result.push(comp);
+        }
+        result
+    }
+}
+
 use parking_lot::RwLock;
 
 use nix_compat::derivation::{Derivation, Output};
@@ -314,7 +361,7 @@ impl NixWorker {
         // and derivation construction).  Scanning and upload are also
         // recorded individually inside prepare_derivation as sub-costs.
         let _prep_guard = TimingGuard::new(&self.stats, &self.stats.derivation_prep_us);
-        let (drv_path, out_path) = self.prepare_derivation().await?;
+        let (drv_path, out_path, working_directory) = self.prepare_derivation().await?;
         let prep_elapsed = _prep_guard.elapsed();
         drop(_prep_guard);
         event!(
@@ -349,7 +396,7 @@ impl NixWorker {
         // Cost center: collect_outputs
         {
             let _guard = TimingGuard::new(&self.stats, &self.stats.collect_outputs_us);
-            let action_result = self.collect_action_result(Path::new(&out_path)).await?;
+            let action_result = self.collect_action_result(Path::new(&out_path), &working_directory).await?;
 
             // Record totals before sending the final update.
             let total_elapsed = action_start.elapsed();
@@ -432,6 +479,7 @@ impl NixWorker {
     async fn collect_action_result(
         &self,
         out_dir: &Path,
+        working_directory: &str,
     ) -> Result<nativelink_util::action_messages::ActionResult, Error> {
         // Read the exit code produced by the script.
         let exit_code: i32 = tokio::fs::read_to_string(out_dir.join("exitcode"))
@@ -452,9 +500,16 @@ impl NixWorker {
             .err_tip(|| "Uploading stderr to CAS")?;
 
         // Walk $out/outputs/ and collect FileInfo entries.
+        // The runner stores outputs under $out/outputs/<working_directory>/…
+        // but REAPI requires output file paths relative to the working
+        // directory.  We walk from $out/outputs/ but relativize the
+        // resulting paths against $out/outputs/<working_directory> so that
+        // paths inside the working directory lose the prefix and paths
+        // outside it get appropriate ../../… prefixes.
         let outputs_dir = out_dir.join("outputs");
+        let relative_to = outputs_dir.join(working_directory);
         let output_files = self
-            .collect_output_files(&outputs_dir)
+            .collect_output_files(&outputs_dir, &relative_to)
             .await
             .err_tip(|| format!("Collecting output files from {}", outputs_dir.display()))?;
 
@@ -672,13 +727,15 @@ impl NixWorker {
     ///
     /// Returns a tuple of (derivation store path, output store path) on
     /// success.
-    async fn prepare_derivation(&self) -> Result<(StorePath<String>, String), Error> {
+    async fn prepare_derivation(&self) -> Result<(StorePath<String>, String, String), Error> {
         let command = get_and_decode_digest::<ProtoCommand>(
             &self.cas_store,
             self.action_info.command_digest.into(),
         )
         .await
         .err_tip(|| "Converting command_digest to Command")?;
+
+        let command_working_directory = command.working_directory.clone();
 
         let mut entries: Vec<PathEntry> = Vec::new();
         self.unfold(
@@ -884,7 +941,8 @@ impl NixWorker {
 
         // Cost center: upload derivation to the Nix store.
         let upload_start = Instant::now();
-        let path_info = self
+        let drv_abs_path = drv_path.to_absolute_path();
+        match self
             .connection
             .add_to_store(
                 CAHash::Text([0; 32]).to_nix_nixbase32_string(),
@@ -892,7 +950,29 @@ impl NixWorker {
                 "reapi-action.drv",
                 &references,
             )
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                // The drv may already exist in the sandbox from a concurrent
+                // action (same content → same store path).  If it's valid,
+                // we can proceed.
+                if self
+                    .connection
+                    .query_path_info(&drv_abs_path)
+                    .await?
+                    .is_some()
+                {
+                    event!(
+                        Level::DEBUG,
+                        drv_path = %drv_abs_path,
+                        "Derivation already exists in store, reusing"
+                    );
+                } else {
+                    return Err(e);
+                }
+            }
+        }
         let upload_elapsed = upload_start.elapsed();
         self.stats
             .record(&self.stats.upload_to_store_us, upload_elapsed);
@@ -909,8 +989,7 @@ impl NixWorker {
         // This is done by the caller (run_inner records the top-level
         // prepare_derivation span and subtracts).
 
-        assert_eq!(&path_info.path.0.0, &drv_path.to_absolute_path());
-        Ok((drv_path, out_path))
+        Ok((drv_path, out_path, command_working_directory))
     }
 
     /// Read a file from disk, upload it to the CAS store, and return its
@@ -938,18 +1017,32 @@ impl NixWorker {
     ///
     /// `out_dir` is the absolute path of the derivation's outputs
     /// sub-directory (e.g. `/nix/store/xxx-reapi-action/outputs`).
-    async fn collect_output_files(&self, out_dir: &Path) -> Result<Vec<FileInfo>, Error> {
+    ///
+    /// `relative_to` is the base path against which output file paths are
+    /// relativized.  Typically this is `out_dir` joined with the REAPI
+    /// working directory, so that paths inside the working directory lose
+    /// the prefix while paths outside get `../../…` prefixes.
+    async fn collect_output_files(
+        &self,
+        out_dir: &Path,
+        relative_to: &Path,
+    ) -> Result<Vec<FileInfo>, Error> {
         let mut files: Vec<FileInfo> = Vec::new();
-        self.walk_and_upload(out_dir, out_dir, &mut files).await?;
+        self.walk_and_upload(relative_to, out_dir, &mut files)
+            .await?;
         Ok(files)
     }
 
     /// Recursively walk `current_dir`, uploading each regular file to the
     /// CAS and appending a [`FileInfo`] to `files`.  Paths in the
-    /// resulting `FileInfo` entries are relative to `root_dir`.
+    /// resulting `FileInfo` entries are relative to `relative_to`.
+    ///
+    /// `relative_to` may differ from the walk root when the REAPI command
+    /// uses a working directory: files inside the working directory get
+    /// simple relative paths while files outside get `../../…` prefixes.
     async fn walk_and_upload(
         &self,
-        root_dir: &Path,
+        relative_to: &Path,
         current_dir: &Path,
         files: &mut Vec<FileInfo>,
     ) -> Result<(), Error> {
@@ -982,19 +1075,10 @@ impl NixWorker {
             let path = entry.path();
 
             if file_type.is_dir() {
-                Box::pin(self.walk_and_upload(root_dir, &path, files)).await?;
+                Box::pin(self.walk_and_upload(relative_to, &path, files)).await?;
             } else if file_type.is_file() {
                 let relative_path = path
-                    .strip_prefix(root_dir)
-                    .map_err(|e| {
-                        make_err!(
-                            Code::Internal,
-                            "Failed to strip prefix {} from {}: {}",
-                            root_dir.display(),
-                            path.display(),
-                            e
-                        )
-                    })?
+                    .relative_to(relative_to)
                     .to_string_lossy()
                     .into_owned();
 
