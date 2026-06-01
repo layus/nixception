@@ -158,6 +158,21 @@ pub struct NixceptionStats {
     /// Number of path-info cache misses (had to query the daemon).
     #[metric(help = "Number of path-info cache misses")]
     pub path_info_cache_misses: AtomicU64,
+
+    // ── Retry counters ───────────────────────────────────────────────
+
+    /// Number of build retries attempted (each retry attempt counts once).
+    #[metric(help = "Number of build retries attempted")]
+    pub retries_attempted: AtomicU64,
+
+    /// Number of retries that ultimately succeeded.
+    #[metric(help = "Number of retries that succeeded")]
+    pub retries_succeeded: AtomicU64,
+
+    /// Number of actions that exhausted all retry attempts and still
+    /// failed.
+    #[metric(help = "Number of actions that exhausted retries")]
+    pub retries_exhausted: AtomicU64,
 }
 
 impl NixceptionStats {
@@ -417,6 +432,34 @@ impl NixceptionStats {
             "Daemon semaphore wait",
             fmt_dur(daemon_wait),
         );
+
+        // Retry stats
+        let retries_attempted = self.retries_attempted.load(Ordering::Relaxed);
+        let retries_succeeded = self.retries_succeeded.load(Ordering::Relaxed);
+        let retries_exhausted = self.retries_exhausted.load(Ordering::Relaxed);
+        if retries_attempted > 0 {
+            let _ = writeln!(s);
+            let _ = writeln!(s, "  Retry statistics:");
+            let _ = writeln!(s, "  {}", "─".repeat(60));
+            let _ = writeln!(
+                s,
+                "    {:.<28} {}",
+                "Retries attempted",
+                retries_attempted,
+            );
+            let _ = writeln!(
+                s,
+                "    {:.<28} {}",
+                "Retries succeeded",
+                retries_succeeded,
+            );
+            let _ = writeln!(
+                s,
+                "    {:.<28} {}",
+                "Retries exhausted",
+                retries_exhausted,
+            );
+        }
         let _ = writeln!(s);
 
         Some(s)

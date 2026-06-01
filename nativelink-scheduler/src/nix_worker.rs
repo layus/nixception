@@ -91,6 +91,8 @@ use serde_json::json;
 use tokio::time;
 use tracing::{Level, event};
 
+use nativelink_store::nix_daemon_connection::BuildOutcome;
+
 use nativelink_proto::build::bazel::remote::execution::v2::{
     Command as ProtoCommand, Directory as ProtoDirectory,
 };
@@ -462,46 +464,123 @@ impl NixWorker {
         Ok(())
     }
 
+    /// Maximum number of retry attempts for transient build failures
+    /// (e.g. OOM kills, signal-killed builders).
+    const MAX_BUILD_RETRIES: u32 = 3;
+
+    /// Initial backoff delay between retries (doubles each attempt).
+    const INITIAL_RETRY_DELAY: time::Duration = time::Duration::from_secs(2);
+
     /// Build the derivation by sending it to the nix daemon and waiting
     /// for completion.
+    ///
+    /// Transient failures (OOM kills, signal-killed builders) are
+    /// automatically retried up to [`MAX_BUILD_RETRIES`] times with
+    /// exponential backoff.  Permanent failures are returned immediately.
     async fn execute_derivation(&self, drv_path: &StorePath<String>) -> Result<(), Error> {
         let drv_abs_path = drv_path.to_absolute_path();
+        let mut last_outcome: Option<BuildOutcome> = None;
 
-        // Run the build alongside a periodic keepalive so the state
-        // manager doesn't time out long-running compilations.
-        let mut keepalive = time::interval(time::Duration::from_secs(30));
-        keepalive.tick().await; // consume the immediate first tick
-
-        let build_results = tokio::select! {
-            res = self.connection.build_derivation(&drv_abs_path) => {
-                res.err_tip(|| format!("Building derivation {}", drv_abs_path))?
+        for attempt in 0..=Self::MAX_BUILD_RETRIES {
+            if attempt > 0 {
+                self.stats.increment(&self.stats.retries_attempted);
+                let delay = Self::INITIAL_RETRY_DELAY * 2u32.pow(attempt - 1);
+                event!(
+                    Level::WARN,
+                    drv_path = ?drv_abs_path,
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    previous_failure = %last_outcome.as_ref().unwrap(),
+                    "Retrying build after transient failure"
+                );
+                time::sleep(delay).await;
             }
-            _ = async {
-                loop {
-                    keepalive.tick().await;
-                    event!(
-                        Level::DEBUG,
-                        drv_path = ?drv_abs_path,
-                        "Sending keepalive update during build"
-                    );
-                    self.update(UpdateOperationType::UpdateWithActionStage(
-                        ActionStage::Executing,
-                    ))
-                    .await;
+
+            // Run the build alongside a periodic keepalive so the state
+            // manager doesn't time out long-running compilations.
+            let mut keepalive = time::interval(time::Duration::from_secs(30));
+            keepalive.tick().await; // consume the immediate first tick
+
+            let outcome = tokio::select! {
+                res = self.connection.build_derivation(&drv_abs_path) => {
+                    res.err_tip(|| format!("Building derivation {}", drv_abs_path))?
                 }
-            } => {
-                unreachable!("keepalive loop never terminates")
+                _ = async {
+                    loop {
+                        keepalive.tick().await;
+                        event!(
+                            Level::DEBUG,
+                            drv_path = ?drv_abs_path,
+                            "Sending keepalive update during build"
+                        );
+                        self.update(UpdateOperationType::UpdateWithActionStage(
+                            ActionStage::Executing,
+                        ))
+                        .await;
+                    }
+                } => {
+                    unreachable!("keepalive loop never terminates")
+                }
+            };
+
+            match &outcome {
+                BuildOutcome::Success => {
+                    if attempt > 0 {
+                        self.stats.increment(&self.stats.retries_succeeded);
+                        event!(
+                            Level::INFO,
+                            drv_path = ?drv_abs_path,
+                            attempt,
+                            "Build succeeded after retry"
+                        );
+                    } else {
+                        event!(
+                            Level::INFO,
+                            drv_path = ?drv_abs_path,
+                            "Build completed successfully"
+                        );
+                    }
+                    return Ok(());
+                }
+                BuildOutcome::RetryableFailure { status, message, path } => {
+                    event!(
+                        Level::WARN,
+                        drv_path = ?drv_abs_path,
+                        status,
+                        message,
+                        failed_path = path,
+                        attempt,
+                        max_retries = Self::MAX_BUILD_RETRIES,
+                        "Build failed with retryable status"
+                    );
+                }
+                BuildOutcome::PermanentFailure { status, message, path } => {
+                    event!(
+                        Level::ERROR,
+                        drv_path = ?drv_abs_path,
+                        status,
+                        message,
+                        failed_path = path,
+                        "Build failed permanently (not retrying)"
+                    );
+                    return Err(outcome.into_error());
+                }
             }
-        };
 
+            last_outcome = Some(outcome);
+        }
+
+        // Exhausted all retries.
+        self.stats.increment(&self.stats.retries_exhausted);
+        let outcome = last_outcome.expect("BUG: loop ran at least once");
         event!(
-            Level::INFO,
+            Level::ERROR,
             drv_path = ?drv_abs_path,
-            results = ?build_results,
-            "Build completed"
+            max_retries = Self::MAX_BUILD_RETRIES,
+            last_failure = %outcome,
+            "Build failed after exhausting all retries"
         );
-
-        Ok(())
+        Err(outcome.into_error())
     }
 
     /// Read the exit code, upload stdout/stderr, walk the outputs

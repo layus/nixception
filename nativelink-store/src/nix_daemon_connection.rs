@@ -41,9 +41,141 @@ use nix_remote::{DerivedPath, StorePathSet, ValidPathInfoWithPath};
 use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::async_nix_conn::AsyncNixConn;
+
+/// The outcome of a `build_derivation` call, classifying success vs
+/// failure and whether the failure is worth retrying.
+#[derive(Debug)]
+pub enum BuildOutcome {
+    /// The build succeeded (status was Built, Substituted, AlreadyValid,
+    /// or ResolvesToAlreadyValid).
+    Success,
+    /// The build failed with a status that might succeed on retry
+    /// (TransientFailure, MiscFailure, DependencyFailed).  These
+    /// correspond to OOM kills, signal-killed builders, and transient
+    /// resource exhaustion.
+    RetryableFailure {
+        status: String,
+        message: String,
+        path: String,
+    },
+    /// The build failed permanently (PermanentFailure, InputRejected,
+    /// CachedFailure, TimedOut, etc.).  Retrying will not help.
+    PermanentFailure {
+        status: String,
+        message: String,
+        path: String,
+    },
+}
+
+impl fmt::Display for BuildOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => write!(f, "build succeeded"),
+            Self::RetryableFailure { status, message, path } => {
+                write!(f, "retryable build failure for {path}: [{status}] {message}")
+            }
+            Self::PermanentFailure { status, message, path } => {
+                write!(f, "permanent build failure for {path}: [{status}] {message}")
+            }
+        }
+    }
+}
+
+impl BuildOutcome {
+    /// Returns `true` if this outcome represents a failure that might
+    /// succeed on retry.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::RetryableFailure { .. })
+    }
+
+    /// Returns `true` if this outcome represents any kind of failure.
+    pub fn is_failure(&self) -> bool {
+        !matches!(self, Self::Success)
+    }
+
+    /// Convert a failure outcome into an [`Error`].  Panics on
+    /// `Success`.
+    pub fn into_error(self) -> Error {
+        match self {
+            Self::Success => panic!("BUG: into_error called on Success"),
+            Self::RetryableFailure { status, message, path } => {
+                make_err!(
+                    Code::Unavailable,
+                    "Build of {} failed (retryable) with status {}: {}",
+                    path,
+                    status,
+                    message
+                )
+            }
+            Self::PermanentFailure { status, message, path } => {
+                make_err!(
+                    Code::Internal,
+                    "Build of {} failed with status {}: {}",
+                    path,
+                    status,
+                    message
+                )
+            }
+        }
+    }
+}
+
+/// Classify a [`BuildStatus`] into a [`BuildOutcome`] variant.
+fn classify_build_status(
+    status: BuildStatus,
+    error_msg: &[u8],
+    path: &[u8],
+) -> BuildOutcome {
+    let status_str = format!("{status:?}");
+    let message = String::from_utf8_lossy(error_msg).to_string();
+    let path_str = String::from_utf8_lossy(path).to_string();
+
+    match status {
+        BuildStatus::Built
+        | BuildStatus::Substituted
+        | BuildStatus::AlreadyValid
+        | BuildStatus::ResolvesToAlreadyValid => BuildOutcome::Success,
+
+        // Retryable: transient resource exhaustion, signal kills,
+        // dependency killed by OOM in a concurrent build.
+        BuildStatus::TransientFailure
+        | BuildStatus::MiscFailure
+        | BuildStatus::DependencyFailed => BuildOutcome::RetryableFailure {
+            status: status_str,
+            message,
+            path: path_str,
+        },
+
+        // Nix reports signal-killed builders (e.g. OOM killer
+        // sending SIGKILL) as PermanentFailure, but the error
+        // message reveals it was a signal kill.  Reclassify these
+        // as retryable since the build may succeed when memory
+        // pressure subsides.
+        BuildStatus::PermanentFailure
+            if message.contains("signal 9")
+                || message.contains("Killed")
+                || message.contains("signal 6")
+                || (message.contains("Cannot build") && message.contains("signal")) =>
+        {
+            BuildOutcome::RetryableFailure {
+                status: status_str,
+                message,
+                path: path_str,
+            }
+        }
+
+        // Everything else is permanent.
+        _ => BuildOutcome::PermanentFailure {
+            status: status_str,
+            message,
+            path: path_str,
+        },
+    }
+}
 
 /// Default maximum number of pooled connections.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 10;
@@ -98,8 +230,8 @@ pub struct NixDaemonConnectionPool {
     cumulative_sem_wait_us: AtomicU64,
 }
 
-impl std::fmt::Debug for NixDaemonConnectionPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for NixDaemonConnectionPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NixDaemonConnectionPool")
             .field("socket_path", &self.socket_path)
             .field("max_connections", &self.semaphore.available_permits())
@@ -283,10 +415,14 @@ impl NixDaemonConnectionPool {
     ///
     /// `drv_path` is the absolute store path of the `.drv` file
     /// (e.g. `/nix/store/...-reapi-action.drv`).
+    ///
+    /// Returns a [`BuildOutcome`] that classifies the result as success,
+    /// retryable failure, or permanent failure.  Transport-level errors
+    /// (broken daemon connection, protocol errors) are returned as `Err`.
     pub async fn build_derivation(
         &self,
         drv_path: &str,
-    ) -> Result<Vec<(DerivedPath, BuildResult)>, Error> {
+    ) -> Result<BuildOutcome, Error> {
         let (_permit, mut checked_out) = self.acquire().await?;
         let conn = &mut checked_out.conn;
 
@@ -325,25 +461,19 @@ impl NixDaemonConnectionPool {
 
             let results = conn.read_build_paths_with_results_response().await?;
 
+            // Classify the first failure (if any) as the outcome.
             for (path, result) in &results {
-                match result.status {
-                    BuildStatus::Built
-                    | BuildStatus::Substituted
-                    | BuildStatus::AlreadyValid
-                    | BuildStatus::ResolvesToAlreadyValid => {}
-                    _ => {
-                        return Err(make_err!(
-                            Code::Internal,
-                            "Build of {:?} failed with status {:?}: {}",
-                            String::from_utf8_lossy(path.as_ref()),
-                            result.status,
-                            String::from_utf8_lossy(&result.error_msg.0)
-                        ));
-                    }
+                let outcome = classify_build_status(
+                    result.status,
+                    &result.error_msg.0,
+                    path.as_ref(),
+                );
+                if outcome.is_failure() {
+                    return Ok(outcome);
                 }
             }
 
-            Ok(results)
+            Ok(BuildOutcome::Success)
         }
         .await;
 
