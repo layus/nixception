@@ -504,7 +504,9 @@ impl NixDaemonConnectionPool {
                     .iter()
                     .map(|sp| nix_remote::StorePath(sp.to_absolute_path().into()))
                     .collect();
-                paths.sort();
+                // Sort by the inner `NixString` (which is `Ord`) so we don't
+                // require an `Ord` impl on `nix_remote::StorePath` itself.
+                paths.sort_by(|a, b| a.0.cmp(&b.0));
                 paths
             },
         };

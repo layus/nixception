@@ -48,8 +48,7 @@ use nix_remote::worker_op::{
     BuildResult, BuildStatus, DrvOutputs, QueryPathInfoResponse, ValidPathInfo, WorkerOp,
 };
 use nix_remote::{
-    DerivedPath, NarHash, NixByteBuf, NixString, StorePath, StorePathSet, StringSet,
-    ValidPathInfoWithPath,
+    DerivedPath, NarHash, NixString, StorePath, StorePathSet, StringSet, ValidPathInfoWithPath,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::UnixStream;
@@ -125,7 +124,7 @@ impl AsyncNixConn {
     /// Read a [`NixString`].
     #[inline]
     async fn read_nix_string(&mut self) -> Result<NixString, Error> {
-        Ok(NixString(NixByteBuf::from(self.read_bytes().await?)))
+        Ok(NixString::from(self.read_bytes().await?))
     }
 
     /// Read a [`StorePath`] (wire-identical to a `NixString`).
@@ -138,7 +137,7 @@ impl AsyncNixConn {
     #[inline]
     async fn read_nar_hash(&mut self) -> Result<NarHash, Error> {
         Ok(NarHash {
-            data: NixByteBuf::from(self.read_bytes().await?),
+            data: self.read_bytes().await?.into(),
         })
     }
 
