@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use nativelink_config::cas_server::WithInstanceName;
-use nativelink_config::stores::{MemorySpec, StoreSpec};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_proto::build::bazel::remote::execution::v2::action_cache_server::ActionCache;
@@ -25,8 +24,8 @@ use nativelink_proto::build::bazel::remote::execution::v2::{
     ActionResult, Digest, GetActionResultRequest, UpdateActionResultRequest, digest_function,
 };
 use nativelink_service::ac_server::AcServer;
-use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::store_trait::StoreLike;
 use pretty_assertions::assert_eq;
@@ -52,26 +51,14 @@ async fn insert_into_store<T: Message>(
 }
 
 async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
-    let store_manager = Arc::new(StoreManager::new());
-    store_manager.add_store(
-        "main_cas",
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    store_manager.add_store(
-        "main_ac",
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    Ok(store_manager)
+    Ok(topology! {
+        stores {
+            main_cas = Memory { ..Default::default() },
+            main_ac = Memory { ..Default::default() },
+        }
+        schedulers {}
+    }
+    .store_manager)
 }
 
 fn make_ac_server(store_manager: &StoreManager) -> Result<AcServer, Error> {

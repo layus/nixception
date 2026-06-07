@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use nativelink_config::cas_server::WithInstanceName;
-use nativelink_config::stores::{MemorySpec, StoreSpec};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_proto::build::bazel::remote::execution::v2::content_addressable_storage_server::ContentAddressableStorage;
@@ -30,8 +29,8 @@ use nativelink_proto::build::bazel::remote::execution::v2::{
 use nativelink_proto::google::rpc::Status as GrpcStatus;
 use nativelink_service::cas_server::CasServer;
 use nativelink_store::ac_utils::serialize_and_upload_message;
-use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::store_trait::{StoreKey, StoreLike};
@@ -46,17 +45,11 @@ const HASH3: &str = "7773456789abcdef000000000000000000000000000000000123456789a
 const BAD_HASH: &str = "BAD_HASH";
 
 async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
-    let store_manager = Arc::new(StoreManager::new());
-    store_manager.add_store(
-        "main_cas",
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    Ok(store_manager)
+    Ok(topology! {
+        stores { main_cas = Memory { ..Default::default() } }
+        schedulers {}
+    }
+    .store_manager)
 }
 
 fn make_cas_server(store_manager: &StoreManager) -> Result<CasServer, Error> {

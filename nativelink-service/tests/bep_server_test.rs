@@ -18,7 +18,6 @@ use std::sync::Arc;
 use futures::StreamExt;
 use hyper::body::Frame;
 use nativelink_config::cas_server::BepConfig;
-use nativelink_config::stores::{MemorySpec, StoreSpec};
 use nativelink_error::{Error, ResultExt};
 use nativelink_macro::nativelink_test;
 use nativelink_proto::com::github::trace_machina::nativelink::events::{BepEvent, bep_event};
@@ -35,8 +34,8 @@ use nativelink_proto::google::devtools::build::v1::{
     PublishBuildToolEventStreamRequest, PublishLifecycleEventRequest, StreamId, build_status,
 };
 use nativelink_service::bep_server::BepServer;
-use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::buf_channel::make_buf_channel_pair;
 use nativelink_util::channel_body_for_tests::ChannelBody;
 use nativelink_util::common::encode_stream_proto;
@@ -51,17 +50,11 @@ const BEP_STORE_NAME: &str = "main_bep";
 
 /// Utility function to construct a [`StoreManager`]
 async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
-    let store_manager = Arc::new(StoreManager::new());
-    store_manager.add_store(
-        BEP_STORE_NAME,
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    Ok(store_manager)
+    Ok(topology! {
+        stores { main_bep = Memory { ..Default::default() } }
+        schedulers {}
+    }
+    .store_manager)
 }
 
 /// Utility function to construct a [`BepServer`]

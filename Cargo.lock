@@ -2780,6 +2780,7 @@ dependencies = [
  "nativelink-proto",
  "nativelink-scheduler",
  "nativelink-store",
+ "nativelink-topology",
  "nativelink-util",
  "opentelemetry",
  "opentelemetry-semantic-conventions",

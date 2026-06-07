@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use nativelink_config::cas_server::{PushConfig, WithInstanceName};
-use nativelink_config::stores::{MemorySpec, StoreSpec};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_proto::build::bazel::remote::asset::v1::push_server::Push;
@@ -25,8 +24,8 @@ use nativelink_proto::build::bazel::remote::asset::v1::{
 use nativelink_proto::build::bazel::remote::execution::v2::Digest;
 use nativelink_service::push_server::PushServer;
 use nativelink_service::remote_asset_proto::RemoteAssetArtifact;
-use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::common::DigestInfo;
 use nativelink_util::store_trait::StoreLike;
 use prost::Message;
@@ -34,17 +33,11 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tonic::{Request, Status};
 
 async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
-    let store_manager = Arc::new(StoreManager::new());
-    store_manager.add_store(
-        "test_push_store",
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    Ok(store_manager)
+    Ok(topology! {
+        stores { test_push_store = Memory { ..Default::default() } }
+        schedulers {}
+    }
+    .store_manager)
 }
 
 #[nativelink_test]

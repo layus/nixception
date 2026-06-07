@@ -16,32 +16,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nativelink_config::cas_server::{ExecutionConfig, WithInstanceName};
-use nativelink_config::stores::{MemorySpec, StoreSpec};
 use nativelink_error::Error;
 use nativelink_macro::nativelink_test;
 use nativelink_proto::build::bazel::remote::execution::v2::execution_server::Execution;
 use nativelink_proto::build::bazel::remote::execution::v2::{ExecuteRequest, digest_function};
 use nativelink_scheduler::mock_scheduler::MockActionScheduler;
 use nativelink_service::execution_server::ExecutionServer;
-use nativelink_store::default_store_factory::store_factory;
 use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::operation_state_manager::ClientStateManager;
 use tonic::Request;
 
 const INSTANCE_NAME: &str = "instance_name";
 
 async fn make_store_manager() -> Result<Arc<StoreManager>, Error> {
-    let store_manager = Arc::new(StoreManager::new());
-    store_manager.add_store(
-        "main_cas",
-        store_factory(
-            &StoreSpec::Memory(MemorySpec::default()),
-            &store_manager,
-            None,
-        )
-        .await?,
-    );
-    Ok(store_manager)
+    Ok(topology! {
+        stores { main_cas = Memory { ..Default::default() } }
+        schedulers {}
+    }
+    .store_manager)
 }
 
 fn make_execution_server(store_manager: &StoreManager) -> Result<ExecutionServer, Error> {
