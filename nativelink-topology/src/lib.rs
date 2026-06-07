@@ -287,10 +287,17 @@ pub mod __rt {
 ///
 /// Expands to a block evaluating to a [`Topology`]. The `services { … }`
 /// block is optional; when omitted, [`Topology::routes`] is empty.
+///
+/// An optional leading `clock: <expr>;` supplies the `fn() -> SystemTime`
+/// the schedulers use as their clock (e.g. a deterministic clock in tests);
+/// it defaults to `SystemTime::now`. The clock must be a non-capturing
+/// function coercible to `fn() -> SystemTime` (the factories take a bare
+/// function pointer, so a closure holding state cannot be used).
 #[macro_export]
 macro_rules! topology {
-    // ── Entry point ────────────────────────────────────────────────────
+    // ── Entry point (explicit scheduler clock) ─────────────────────────
     (
+        clock: $clock:expr;
         stores { $( $sname:ident = $skw:ident $({ $($sf:tt)* })? ),* $(,)? }
         schedulers { $( $schname:ident = $schkw:ident { $($schf:tt)* } ),* $(,)? }
         $( services { $( $svc_name:ident : $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? } )?
@@ -316,10 +323,10 @@ macro_rules! topology {
         // Schedulers: bind the per-variant factory results under each
         // scheduler's own name (so later service references can be
         // name-checked by the compiler), then populate the action / worker
-        // maps from them.
+        // maps from them. `$clock` is threaded in as the scheduler clock.
         $(
             let $schname =
-                $crate::__topology_scheduler!(store_manager, $schkw { $($schf)* });
+                $crate::__topology_scheduler!(store_manager, $clock, $schkw { $($schf)* });
             if let Some(__a) = $schname.0.clone() {
                 let __a: $crate::__rt::Arc<dyn $crate::__rt::ClientStateManager> = __a;
                 action_schedulers.insert(stringify!($schname).to_string(), __a);
@@ -348,6 +355,22 @@ macro_rules! topology {
             routes,
         }
     }};
+
+    // ── Entry point (default clock) ────────────────────────────────────
+    // Forwards to the explicit-clock arm with the real wall clock. Each
+    // block's tokens are forwarded verbatim for that arm to parse.
+    (
+        stores { $($stores:tt)* }
+        schedulers { $($scheds:tt)* }
+        $( services { $($svcs:tt)* } )?
+    ) => {
+        $crate::topology! {
+            clock: $crate::__rt::SystemTime::now;
+            stores { $($stores)* }
+            schedulers { $($scheds)* }
+            $( services { $($svcs)* } )?
+        }
+    };
 }
 
 /// Internal: construct one named store binding.
@@ -511,33 +534,33 @@ macro_rules! __topology_store {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __topology_scheduler {
-    ($sm:ident, Simple { $($f:tt)* }) => {
+    ($sm:ident, $clock:expr, Simple { $($f:tt)* }) => {
         $crate::__rt::simple_scheduler_factory(
             &$crate::__rt::SimpleSpec { $($f)* },
             &$sm,
-            $crate::__rt::SystemTime::now,
+            $clock,
             None,
         )?
     };
-    ($sm:ident, Grpc { $($f:tt)* }) => {
+    ($sm:ident, $clock:expr, Grpc { $($f:tt)* }) => {
         $crate::__rt::grpc_scheduler_factory(&$crate::__rt::SchedGrpcSpec { $($f)* })?
     };
-    ($sm:ident, NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }) => {
+    ($sm:ident, $clock:expr, NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }) => {
         $crate::__rt::nix_scheduler_factory(
             &$crate::__rt::NixProxySpec {
                 ac_store: stringify!($ac).to_string(),
                 cas_store: stringify!($cas).to_string(),
             },
             &$sm,
-            $crate::__rt::SystemTime::now,
+            $clock,
         )?
     };
-    ($sm:ident, CacheLookup {
+    ($sm:ident, $clock:expr, CacheLookup {
         ac_store: $ac:ident,
         scheduler: $inner_kw:ident { $($inner_f:tt)* }
         $(, $($rest:tt)*)?
     }) => {{
-        let nested = $crate::__topology_scheduler!($sm, $inner_kw { $($inner_f)* });
+        let nested = $crate::__topology_scheduler!($sm, $clock, $inner_kw { $($inner_f)* });
         $crate::__rt::cache_lookup_scheduler_factory(
             &$crate::__rt::CacheLookupSpec {
                 ac_store: stringify!($ac).to_string(),
@@ -548,11 +571,11 @@ macro_rules! __topology_scheduler {
             nested,
         )?
     }};
-    ($sm:ident, PropertyModifier {
+    ($sm:ident, $clock:expr, PropertyModifier {
         scheduler: $inner_kw:ident { $($inner_f:tt)* }
         $(, $($rest:tt)*)?
     }) => {{
-        let nested = $crate::__topology_scheduler!($sm, $inner_kw { $($inner_f)* });
+        let nested = $crate::__topology_scheduler!($sm, $clock, $inner_kw { $($inner_f)* });
         $crate::__rt::property_modifier_scheduler_factory(
             &$crate::__rt::PropertyModifierSpec {
                 scheduler: ::std::boxed::Box::new($crate::placeholder_sched_spec())
@@ -564,7 +587,7 @@ macro_rules! __topology_scheduler {
 
     // Catch-all: an unrecognized scheduler keyword (or wrong fields)
     // produces a readable error.
-    ($sm:ident, $other:ident { $($f:tt)* }) => {
+    ($sm:ident, $clock:expr, $other:ident { $($f:tt)* }) => {
         ::core::compile_error!(::core::concat!(
             "`topology!`: unknown scheduler kind `",
             ::core::stringify!($other),

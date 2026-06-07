@@ -149,7 +149,7 @@ pub fn simple_scheduler_factory(
             let awaited_action_db = memory_awaited_action_db_factory(
                 spec.retain_completed_for_s,
                 &task_change_notify,
-                SystemTime::now,
+                now_fn,
             );
             let (action_scheduler, worker_scheduler) = SimpleScheduler::new(
                 spec,

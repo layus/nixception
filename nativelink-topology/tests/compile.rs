@@ -89,5 +89,28 @@ async fn compile_all_services() -> Result<(), nativelink_error::Error> {
     Ok(())
 }
 
+/// Exercises the optional `clock:` parameter with a non-capturing mock
+/// clock (the scheduler factories take a bare `fn() -> SystemTime`, so the
+/// clock must be a free function, not a state-capturing closure).
+#[expect(dead_code, reason = "compiled, never executed")]
+async fn compile_with_mock_clock() -> Result<(), nativelink_error::Error> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn mock_now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    let _topology = topology! {
+        clock: mock_now;
+        stores {
+            nop = Noop,
+        }
+        schedulers {
+            simple = Simple { ..Default::default() },
+        }
+    };
+    Ok(())
+}
+
 #[test]
 fn it_compiles() {}
