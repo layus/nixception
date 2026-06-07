@@ -2873,9 +2873,11 @@ dependencies = [
  "nativelink-config",
  "nativelink-error",
  "nativelink-scheduler",
+ "nativelink-service",
  "nativelink-store",
  "nativelink-util",
  "tokio",
+ "tonic 0.13.1",
 ]
 
 [[package]]

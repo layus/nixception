@@ -20,7 +20,7 @@
 //! confirms the hermetic `$crate::__rt` paths resolve from an external
 //! crate that imports nothing but the macro itself.
 
-use nativelink_topology::topology;
+use nativelink_topology::{services, topology};
 
 /// Exercises every store and scheduler arm in a single invocation.
 #[expect(dead_code, reason = "compiled, never executed")]
@@ -56,6 +56,38 @@ async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
             modifier  = PropertyModifier {
                 scheduler: Simple { ..Default::default() },
                 modifications: vec![],
+            },
+        }
+    };
+    Ok(())
+}
+
+/// Exercises every `services!` arm.
+#[expect(dead_code, reason = "compiled, never executed")]
+async fn compile_all_services() -> Result<(), nativelink_error::Error> {
+    let (store_manager, action_schedulers, worker_schedulers) = topology! {
+        stores {
+            mem = Memory { eviction_policy: None },
+            nop = Noop,
+            nix = Nix { socket_path: None },
+        }
+        schedulers {
+            nix_scheduler = NixProxy { ac_store: nop, cas_store: nix },
+        }
+    };
+    let _routes = services! {
+        stores: store_manager,
+        action_schedulers: action_schedulers,
+        worker_schedulers: worker_schedulers,
+        services {
+            cas:          Cas { cas_store: mem },
+            ac:           Ac { ac_store: nop, read_only: false },
+            execution:    Execution { cas_store: mem, scheduler: nix_scheduler },
+            capabilities: Capabilities { scheduler: nix_scheduler },
+            bytestream:   ByteStream {
+                cas_store: mem,
+                max_bytes_per_stream: 0,
+                persist_stream_on_disconnect_timeout: 0,
             },
         }
     };

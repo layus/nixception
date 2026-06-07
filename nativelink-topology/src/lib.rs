@@ -67,6 +67,7 @@
 //!
 //! [`StoreManager`]: nativelink_store::store_manager::StoreManager
 
+use nativelink_config::cas_server::WithInstanceName;
 use nativelink_config::schedulers::{SchedulerSpec, SimpleSpec};
 use nativelink_config::stores::{NoopSpec, StoreSpec};
 
@@ -88,6 +89,17 @@ pub fn placeholder_sched_spec() -> SchedulerSpec {
     SchedulerSpec::Simple(SimpleSpec::default())
 }
 
+/// Wrap a single service config in the `WithInstanceName` vec expected by
+/// the service constructors, using the default `"main"` instance name.
+#[doc(hidden)]
+#[must_use]
+pub fn with_instance<T>(config: T) -> Vec<WithInstanceName<T>> {
+    vec![WithInstanceName {
+        instance_name: "main".to_string(),
+        config,
+    }]
+}
+
 /// Hermetic re-exports used by the [`topology!`] macro expansion.
 ///
 /// This module is an implementation detail: it lets the macro reference
@@ -100,6 +112,10 @@ pub mod __rt {
     pub use std::sync::Arc;
     pub use std::time::SystemTime;
 
+    pub use nativelink_config::cas_server::{
+        AcStoreConfig, ByteStreamConfig, CapabilitiesConfig, CapabilitiesRemoteExecutionConfig,
+        CasStoreConfig, ExecutionConfig,
+    };
     pub use nativelink_config::schedulers::{
         CacheLookupSpec, GrpcSpec as SchedGrpcSpec, NixProxySpec, PropertyModifierSpec, SimpleSpec,
     };
@@ -114,6 +130,11 @@ pub mod __rt {
         property_modifier_scheduler_factory, simple_scheduler_factory,
     };
     pub use nativelink_scheduler::worker_scheduler::WorkerScheduler;
+    pub use nativelink_service::ac_server::AcServer;
+    pub use nativelink_service::bytestream_server::ByteStreamServer;
+    pub use nativelink_service::capabilities_server::CapabilitiesServer;
+    pub use nativelink_service::cas_server::CasServer;
+    pub use nativelink_service::execution_server::ExecutionServer;
     pub use nativelink_store::completeness_checking_store::CompletenessCheckingStore;
     pub use nativelink_store::compression_store::CompressionStore;
     pub use nativelink_store::dedup_store::DedupStore;
@@ -137,6 +158,7 @@ pub mod __rt {
     pub use nativelink_store::verify_store::VerifyStore;
     pub use nativelink_util::operation_state_manager::ClientStateManager;
     pub use nativelink_util::store_trait::Store;
+    pub use tonic::service::Routes;
 }
 
 /// Construct a nativelink store and scheduler topology.
@@ -375,4 +397,111 @@ macro_rules! topology {
             nested,
         )?
     }};
+}
+
+/// Assemble a tonic [`Routes`] builder from a set of gRPC services.
+///
+/// Companion to [`topology!`]: given the `store_manager`,
+/// `action_schedulers`, and `worker_schedulers` it produced, this builds
+/// the cache / execution gRPC services and wires them into a routing
+/// builder ready for `.into_axum_router()`.
+///
+/// Store and scheduler dependencies are referenced **by name** (the
+/// identifiers used in the `topology!` `stores` / `schedulers` blocks).
+///
+/// Like [`topology!`], it must be invoked in an `async` context returning a
+/// `Result<_, E>` where `E: From<nativelink_error::Error>` (the service
+/// constructors use `?`, and `Capabilities` is `async`).
+///
+/// ```ignore
+/// let routes = services! {
+///     stores: store_manager,
+///     action_schedulers: action_schedulers,
+///     worker_schedulers: worker_schedulers,
+///     services {
+///         cas:          Cas { cas_store: nix_store },
+///         ac:           Ac { ac_store: void, read_only: false },
+///         execution:    Execution { cas_store: nix_store, scheduler: nix_scheduler },
+///         capabilities: Capabilities { scheduler: nix_scheduler },
+///         bytestream:   ByteStream { cas_store: nix_store,
+///                                    max_bytes_per_stream: 0,
+///                                    persist_stream_on_disconnect_timeout: 0 },
+///     }
+/// };
+/// let svc = routes.into_axum_router();
+/// ```
+///
+/// [`Routes`]: tonic::service::Routes
+#[macro_export]
+macro_rules! services {
+    (
+        stores: $sm:ident,
+        action_schedulers: $act:ident,
+        worker_schedulers: $wrk:ident,
+        services { $( $svc_name:ident : $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? }
+    ) => {{
+        // Silence "unused" when a particular dependency map is not consumed
+        // by the selected services.
+        let _ = (&$sm, &$act, &$wrk);
+        $crate::__rt::Routes::builder()
+            .routes()
+            $(
+                .add_service(
+                    $crate::services!(@svc $sm, $act, $wrk, $svc_kw { $($svc_f)* })
+                )
+            )*
+    }};
+
+    (@svc $sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {
+        $crate::__rt::CasServer::new(
+            &$crate::with_instance($crate::__rt::CasStoreConfig {
+                cas_store: stringify!($cs).to_string(),
+            }),
+            &$sm,
+        )?
+        .into_service()
+    };
+    (@svc $sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {
+        $crate::__rt::AcServer::new(
+            &$crate::with_instance($crate::__rt::AcStoreConfig {
+                ac_store: stringify!($acs).to_string(),
+                read_only: $ro,
+            }),
+            &$sm,
+        )?
+        .into_service()
+    };
+    (@svc $sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {
+        $crate::__rt::ExecutionServer::new(
+            &$crate::with_instance($crate::__rt::ExecutionConfig {
+                cas_store: stringify!($cs).to_string(),
+                scheduler: stringify!($sch).to_string(),
+            }),
+            &$act,
+            &$sm,
+        )?
+        .into_service()
+    };
+    (@svc $sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {
+        $crate::__rt::CapabilitiesServer::new(
+            &$crate::with_instance($crate::__rt::CapabilitiesConfig {
+                remote_execution: Some($crate::__rt::CapabilitiesRemoteExecutionConfig {
+                    scheduler: stringify!($sch).to_string(),
+                }),
+            }),
+            &$act,
+        )
+        .await?
+        .into_service()
+    };
+    (@svc $sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::ByteStreamServer::new(
+            &$crate::with_instance($crate::__rt::ByteStreamConfig {
+                cas_store: stringify!($cs).to_string()
+                $(, $($rest)*)?
+            }),
+            &$sm,
+        )?
+        .into_service()
+    };
 }
