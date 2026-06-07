@@ -88,7 +88,7 @@ use std::sync::Arc;
 
 use nativelink_config::cas_server::WithInstanceName;
 use nativelink_config::schedulers::{SchedulerSpec, SimpleSpec};
-use nativelink_config::stores::{NoopSpec, StoreSpec};
+use nativelink_config::stores::{ExperimentalCloudObjectSpec, NoopSpec, StoreSpec};
 use nativelink_scheduler::worker_scheduler::WorkerScheduler;
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::operation_state_manager::ClientStateManager;
@@ -157,6 +157,66 @@ pub fn with_instance<T>(config: T) -> Vec<WithInstanceName<T>> {
         instance_name: "main".to_string(),
         config,
     }]
+}
+
+// ── Exhaustiveness guards ──────────────────────────────────────────────
+//
+// `macro_rules!` has no knowledge of the type system, so nothing links the
+// `topology!` `@store` / `@scheduler` arms to the variants of `StoreSpec` /
+// `SchedulerSpec`. These never-executed functions borrow the compiler's
+// own exhaustiveness checking instead: each is a wildcard-free `match`, so
+// adding a new spec variant fails to compile *here* ("non-exhaustive
+// patterns"), reminding whoever adds the variant to also add the matching
+// macro arm named in the comment beside each pattern.
+
+/// Compile-time guard mirroring the `@store` keyword set against
+/// [`StoreSpec`]. Each arm names the `topology!` store keyword it maps to.
+#[doc(hidden)]
+fn _assert_store_spec_exhaustive(spec: &StoreSpec) {
+    match spec {
+        StoreSpec::Memory(_) => {}                       // Memory
+        StoreSpec::ExperimentalCloudObjectStore(_) => {} // Aws / Gcs / OntapS3
+        StoreSpec::OntapS3ExistenceCache(_) => {}        // OntapS3ExistenceCache
+        StoreSpec::Verify(_) => {}                       // Verify
+        StoreSpec::CompletenessChecking(_) => {}         // CompletenessChecking
+        StoreSpec::Compression(_) => {}                  // Compression
+        StoreSpec::Dedup(_) => {}                        // Dedup
+        StoreSpec::ExistenceCache(_) => {}               // ExistenceCache
+        StoreSpec::FastSlow(_) => {}                     // FastSlow
+        StoreSpec::Shard(_) => {}                        // Shard
+        StoreSpec::Filesystem(_) => {}                   // Filesystem
+        StoreSpec::RefStore(_) => {}                     // Ref
+        StoreSpec::SizePartitioning(_) => {}             // SizePartitioning
+        StoreSpec::Grpc(_) => {}                         // Grpc
+        StoreSpec::RedisStore(_) => {}                   // Redis
+        StoreSpec::NixStore(_) => {}                     // Nix
+        StoreSpec::Noop(_) => {}                         // Noop
+        StoreSpec::ExperimentalMongo(_) => {}            // Mongo
+    }
+}
+
+/// Compile-time guard for the cloud-object provider sub-enum, which the
+/// macro splits into the distinct `Aws` / `Gcs` / `OntapS3` keywords.
+#[doc(hidden)]
+fn _assert_cloud_object_spec_exhaustive(spec: &ExperimentalCloudObjectSpec) {
+    match spec {
+        ExperimentalCloudObjectSpec::Aws(_) => {}   // Aws
+        ExperimentalCloudObjectSpec::Gcs(_) => {}   // Gcs
+        ExperimentalCloudObjectSpec::Ontap(_) => {} // OntapS3
+    }
+}
+
+/// Compile-time guard mirroring the `@scheduler` keyword set against
+/// [`SchedulerSpec`]. Each arm names the `topology!` scheduler keyword.
+#[doc(hidden)]
+fn _assert_scheduler_spec_exhaustive(spec: &SchedulerSpec) {
+    match spec {
+        SchedulerSpec::Simple(_) => {}           // Simple
+        SchedulerSpec::Grpc(_) => {}             // Grpc
+        SchedulerSpec::CacheLookup(_) => {}      // CacheLookup
+        SchedulerSpec::PropertyModifier(_) => {} // PropertyModifier
+        SchedulerSpec::NixProxy(_) => {}         // NixProxy
+    }
 }
 
 /// Hermetic re-exports used by the [`topology!`] macro expansion.
@@ -420,6 +480,16 @@ macro_rules! topology {
             ::std::vec![ $( $s.clone() ),* ],
         )?)
     };
+    // Catch-all: an unrecognized store keyword (or one written with the
+    // wrong child-store fields) produces a readable error instead of the
+    // default "no rules expected this token".
+    (@store $sm:ident, $other:ident $({ $($f:tt)* })?) => {
+        ::core::compile_error!(::core::concat!(
+            "`topology!`: unknown store kind `",
+            ::core::stringify!($other),
+            "` (or wrong fields for that store)",
+        ))
+    };
 
     // ── Schedulers ─────────────────────────────────────────────────────
     // Every arm yields a `SchedulerFactoryResults`
@@ -475,6 +545,16 @@ macro_rules! topology {
             nested,
         )?
     }};
+
+    // Catch-all: an unrecognized scheduler keyword (or wrong fields)
+    // produces a readable error.
+    (@scheduler $sm:ident, $other:ident { $($f:tt)* }) => {
+        ::core::compile_error!(::core::concat!(
+            "`topology!`: unknown scheduler kind `",
+            ::core::stringify!($other),
+            "` (or wrong fields for that scheduler)",
+        ))
+    };
 
     // ── Services ───────────────────────────────────────────────────────
     // Each arm yields a tonic service. The leading `let _ = …;` line ties
@@ -539,4 +619,14 @@ macro_rules! topology {
         )?
         .into_service()
     }};
+
+    // Catch-all: an unrecognized service keyword (or wrong fields) produces
+    // a readable error.
+    (@svc $sm:ident, $act:ident, $wrk:ident, $other:ident { $($f:tt)* }) => {
+        ::core::compile_error!(::core::concat!(
+            "`topology!`: unknown service kind `",
+            ::core::stringify!($other),
+            "` (or wrong fields for that service)",
+        ))
+    };
 }
