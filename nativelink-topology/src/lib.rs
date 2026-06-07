@@ -309,7 +309,7 @@ macro_rules! topology {
         // (wrapper) stores and services, and registered in the store manager.
         $(
             let $sname: $crate::__rt::Store =
-                $crate::topology!(@store store_manager, $skw $({ $($sf)* })?);
+                $crate::__topology_store!(store_manager, $skw $({ $($sf)* })?);
             store_manager.add_store(stringify!($sname), $sname.clone());
         )*
 
@@ -319,7 +319,7 @@ macro_rules! topology {
         // maps from them.
         $(
             let $schname =
-                $crate::topology!(@scheduler store_manager, $schkw { $($schf)* });
+                $crate::__topology_scheduler!(store_manager, $schkw { $($schf)* });
             if let Some(__a) = $schname.0.clone() {
                 let __a: $crate::__rt::Arc<dyn $crate::__rt::ClientStateManager> = __a;
                 action_schedulers.insert(stringify!($schname).to_string(), __a);
@@ -335,8 +335,8 @@ macro_rules! topology {
         // `store_manager` / the scheduler maps at runtime.
         let routes = $crate::__rt::Routes::builder().routes()
             $($(
-                .add_service($crate::topology!(
-                    @svc store_manager, action_schedulers, worker_schedulers,
+                .add_service($crate::__topology_svc!(
+                    store_manager, action_schedulers, worker_schedulers,
                     $svc_kw { $($svc_f)* }
                 ))
             )*)?;
@@ -348,56 +348,67 @@ macro_rules! topology {
             routes,
         }
     }};
+}
 
+/// Internal: construct one named store binding.
+///
+/// Split out of [`topology!`] purely for readability. It is
+/// `#[macro_export] #[doc(hidden)]` rather than a private `macro_rules!`
+/// because [`topology!`] is itself exported and expands in other crates,
+/// where only `$crate::`-reachable (i.e. exported) macros are in scope. Not
+/// part of the public API and not covered by semver.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __topology_store {
     // ── Leaf stores ────────────────────────────────────────────────────
     // The `{ … }` fields are forwarded verbatim into the underlying spec,
     // so the caller writes valid spec fields directly.
-    (@store $sm:ident, Noop) => {
+    ($sm:ident, Noop) => {
         $crate::__rt::Store::new($crate::__rt::NoopStore::new())
     };
-    (@store $sm:ident, Memory { $($f:tt)* }) => {
+    ($sm:ident, Memory { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::MemoryStore::new(&$crate::__rt::MemorySpec { $($f)* }))
     };
-    (@store $sm:ident, Nix { $($f:tt)* }) => {
+    ($sm:ident, Nix { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::NixStore::new(&$crate::__rt::NixSpec { $($f)* }).await?)
     };
-    (@store $sm:ident, Filesystem { $($f:tt)* }) => {
+    ($sm:ident, Filesystem { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             <$crate::__rt::FilesystemStore>::new(&$crate::__rt::FilesystemSpec { $($f)* }).await?,
         )
     };
-    (@store $sm:ident, Redis { $($f:tt)* }) => {
+    ($sm:ident, Redis { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::RedisStore::new($crate::__rt::RedisSpec { $($f)* })?)
     };
-    (@store $sm:ident, Grpc { $($f:tt)* }) => {
+    ($sm:ident, Grpc { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::GrpcStore::new(&$crate::__rt::StoreGrpcSpec { $($f)* }).await?)
     };
-    (@store $sm:ident, Mongo { $($f:tt)* }) => {
+    ($sm:ident, Mongo { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             $crate::__rt::ExperimentalMongoStore::new($crate::__rt::ExperimentalMongoSpec { $($f)* }).await?,
         )
     };
-    (@store $sm:ident, Aws { $($f:tt)* }) => {
+    ($sm:ident, Aws { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             $crate::__rt::S3Store::new(&$crate::__rt::ExperimentalAwsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
         )
     };
-    (@store $sm:ident, Gcs { $($f:tt)* }) => {
+    ($sm:ident, Gcs { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             $crate::__rt::GcsStore::new(&$crate::__rt::ExperimentalGcsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
         )
     };
-    (@store $sm:ident, OntapS3 { $($f:tt)* }) => {
+    ($sm:ident, OntapS3 { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             $crate::__rt::OntapS3Store::new(&$crate::__rt::ExperimentalOntapS3Spec { $($f)* }, $crate::__rt::SystemTime::now).await?,
         )
     };
-    (@store $sm:ident, OntapS3ExistenceCache { $($f:tt)* }) => {
+    ($sm:ident, OntapS3ExistenceCache { $($f:tt)* }) => {
         $crate::__rt::Store::new(
             $crate::__rt::OntapS3ExistenceCache::new(&$crate::__rt::OntapS3ExistenceCacheSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
         )
     };
-    (@store $sm:ident, Ref { $($f:tt)* }) => {
+    ($sm:ident, Ref { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::RefStore::new(
             &$crate::__rt::RefSpec { $($f)* },
             $crate::__rt::Arc::downgrade(&$sm),
@@ -407,25 +418,25 @@ macro_rules! topology {
     // ── Wrapper stores ─────────────────────────────────────────────────
     // Child-store fields take the *name* of an earlier store binding; every
     // remaining spec field must be supplied verbatim after the children.
-    (@store $sm:ident, Verify { backend: $b:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, Verify { backend: $b:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::VerifyStore::new(
             &$crate::__rt::VerifySpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
             $b.clone(),
         ))
     };
-    (@store $sm:ident, Compression { backend: $b:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, Compression { backend: $b:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::CompressionStore::new(
             &$crate::__rt::CompressionSpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
             $b.clone(),
         )?)
     };
-    (@store $sm:ident, ExistenceCache { backend: $b:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, ExistenceCache { backend: $b:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::ExistenceCacheStore::new(
             &$crate::__rt::ExistenceCacheSpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
             $b.clone(),
         ))
     };
-    (@store $sm:ident, Dedup { index_store: $i:ident, content_store: $c:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, Dedup { index_store: $i:ident, content_store: $c:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::DedupStore::new(
             &$crate::__rt::DedupSpec {
                 index_store: $crate::placeholder_store_spec(),
@@ -436,10 +447,10 @@ macro_rules! topology {
             $c.clone(),
         )?)
     };
-    (@store $sm:ident, CompletenessChecking { backend: $b:ident, cas_store: $c:ident $(,)? }) => {
+    ($sm:ident, CompletenessChecking { backend: $b:ident, cas_store: $c:ident $(,)? }) => {
         $crate::__rt::Store::new($crate::__rt::CompletenessCheckingStore::new($b.clone(), $c.clone()))
     };
-    (@store $sm:ident, FastSlow { fast: $f:ident, slow: $s:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, FastSlow { fast: $f:ident, slow: $s:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::FastSlowStore::new(
             &$crate::__rt::FastSlowSpec {
                 fast: $crate::placeholder_store_spec(),
@@ -450,7 +461,7 @@ macro_rules! topology {
             $s.clone(),
         ))
     };
-    (@store $sm:ident, SizePartitioning { lower_store: $l:ident, upper_store: $u:ident $(, $($rest:tt)*)? }) => {
+    ($sm:ident, SizePartitioning { lower_store: $l:ident, upper_store: $u:ident $(, $($rest:tt)*)? }) => {
         $crate::__rt::Store::new($crate::__rt::SizePartitioningStore::new(
             &$crate::__rt::SizePartitioningSpec {
                 lower_store: $crate::placeholder_store_spec(),
@@ -461,7 +472,7 @@ macro_rules! topology {
             $u.clone(),
         ))
     };
-    (@store $sm:ident, Shard { stores: [ $($s:ident),* $(,)? ] $(,)? }) => {
+    ($sm:ident, Shard { stores: [ $($s:ident),* $(,)? ] $(,)? }) => {
         $crate::__rt::Store::new($crate::__rt::ShardStore::new(
             &$crate::__rt::ShardSpec {
                 stores: ::std::vec![
@@ -483,19 +494,24 @@ macro_rules! topology {
     // Catch-all: an unrecognized store keyword (or one written with the
     // wrong child-store fields) produces a readable error instead of the
     // default "no rules expected this token".
-    (@store $sm:ident, $other:ident $({ $($f:tt)* })?) => {
+    ($sm:ident, $other:ident $({ $($f:tt)* })?) => {
         ::core::compile_error!(::core::concat!(
             "`topology!`: unknown store kind `",
             ::core::stringify!($other),
             "` (or wrong fields for that store)",
         ))
     };
+}
 
-    // ── Schedulers ─────────────────────────────────────────────────────
-    // Every arm yields a `SchedulerFactoryResults`
-    // (`(Option<Arc<dyn ClientStateManager>>, Option<Arc<dyn WorkerScheduler>>)`)
-    // by delegating to the shared per-variant leaf factories.
-    (@scheduler $sm:ident, Simple { $($f:tt)* }) => {
+/// Internal: construct one named scheduler, yielding a
+/// `SchedulerFactoryResults`
+/// (`(Option<Arc<dyn ClientStateManager>>, Option<Arc<dyn WorkerScheduler>>)`).
+///
+/// See [`__topology_store!`] for why this is an exported-but-hidden helper.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __topology_scheduler {
+    ($sm:ident, Simple { $($f:tt)* }) => {
         $crate::__rt::simple_scheduler_factory(
             &$crate::__rt::SimpleSpec { $($f)* },
             &$sm,
@@ -503,10 +519,10 @@ macro_rules! topology {
             None,
         )?
     };
-    (@scheduler $sm:ident, Grpc { $($f:tt)* }) => {
+    ($sm:ident, Grpc { $($f:tt)* }) => {
         $crate::__rt::grpc_scheduler_factory(&$crate::__rt::SchedGrpcSpec { $($f)* })?
     };
-    (@scheduler $sm:ident, NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }) => {
+    ($sm:ident, NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }) => {
         $crate::__rt::nix_scheduler_factory(
             &$crate::__rt::NixProxySpec {
                 ac_store: stringify!($ac).to_string(),
@@ -516,12 +532,12 @@ macro_rules! topology {
             $crate::__rt::SystemTime::now,
         )?
     };
-    (@scheduler $sm:ident, CacheLookup {
+    ($sm:ident, CacheLookup {
         ac_store: $ac:ident,
         scheduler: $inner_kw:ident { $($inner_f:tt)* }
         $(, $($rest:tt)*)?
     }) => {{
-        let nested = $crate::topology!(@scheduler $sm, $inner_kw { $($inner_f)* });
+        let nested = $crate::__topology_scheduler!($sm, $inner_kw { $($inner_f)* });
         $crate::__rt::cache_lookup_scheduler_factory(
             &$crate::__rt::CacheLookupSpec {
                 ac_store: stringify!($ac).to_string(),
@@ -532,11 +548,11 @@ macro_rules! topology {
             nested,
         )?
     }};
-    (@scheduler $sm:ident, PropertyModifier {
+    ($sm:ident, PropertyModifier {
         scheduler: $inner_kw:ident { $($inner_f:tt)* }
         $(, $($rest:tt)*)?
     }) => {{
-        let nested = $crate::topology!(@scheduler $sm, $inner_kw { $($inner_f)* });
+        let nested = $crate::__topology_scheduler!($sm, $inner_kw { $($inner_f)* });
         $crate::__rt::property_modifier_scheduler_factory(
             &$crate::__rt::PropertyModifierSpec {
                 scheduler: ::std::boxed::Box::new($crate::placeholder_sched_spec())
@@ -548,20 +564,25 @@ macro_rules! topology {
 
     // Catch-all: an unrecognized scheduler keyword (or wrong fields)
     // produces a readable error.
-    (@scheduler $sm:ident, $other:ident { $($f:tt)* }) => {
+    ($sm:ident, $other:ident { $($f:tt)* }) => {
         ::core::compile_error!(::core::concat!(
             "`topology!`: unknown scheduler kind `",
             ::core::stringify!($other),
             "` (or wrong fields for that scheduler)",
         ))
     };
+}
 
-    // ── Services ───────────────────────────────────────────────────────
-    // Each arm yields a tonic service. The leading `let _ = …;` line ties
-    // every store / scheduler dependency to its `topology!` binding so a
-    // misspelled name fails to compile; the constructors still resolve the
-    // names through `store_manager` / the scheduler maps at runtime.
-    (@svc $sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {{
+/// Internal: construct one tonic service. The leading `let _ = …;` line
+/// ties every store / scheduler dependency to its `topology!` binding so a
+/// misspelled name fails to compile; the constructors still resolve the
+/// names through `store_manager` / the scheduler maps at runtime.
+///
+/// See [`__topology_store!`] for why this is an exported-but-hidden helper.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __topology_svc {
+    ($sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::CasServer::new(
             &$crate::with_instance($crate::__rt::CasStoreConfig {
@@ -571,7 +592,7 @@ macro_rules! topology {
         )?
         .into_service()
     }};
-    (@svc $sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {{
         let _: &$crate::__rt::Store = &$acs;
         $crate::__rt::AcServer::new(
             &$crate::with_instance($crate::__rt::AcStoreConfig {
@@ -582,7 +603,7 @@ macro_rules! topology {
         )?
         .into_service()
     }};
-    (@svc $sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         let _ = &$sch;
         $crate::__rt::ExecutionServer::new(
@@ -595,7 +616,7 @@ macro_rules! topology {
         )?
         .into_service()
     }};
-    (@svc $sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {{
         let _ = &$sch;
         $crate::__rt::CapabilitiesServer::new(
             &$crate::with_instance($crate::__rt::CapabilitiesConfig {
@@ -608,7 +629,7 @@ macro_rules! topology {
         .await?
         .into_service()
     }};
-    (@svc $sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::ByteStreamServer::new(
             &$crate::with_instance($crate::__rt::ByteStreamConfig {
@@ -622,7 +643,7 @@ macro_rules! topology {
 
     // Catch-all: an unrecognized service keyword (or wrong fields) produces
     // a readable error.
-    (@svc $sm:ident, $act:ident, $wrk:ident, $other:ident { $($f:tt)* }) => {
+    ($sm:ident, $act:ident, $wrk:ident, $other:ident { $($f:tt)* }) => {
         ::core::compile_error!(::core::concat!(
             "`topology!`: unknown service kind `",
             ::core::stringify!($other),
