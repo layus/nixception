@@ -60,6 +60,17 @@
 //! still resolve those names through the [`StoreManager`] / scheduler maps
 //! at runtime.
 //!
+//! Each service is registered under an *instance name*, written as an
+//! optional string literal between the binding name and the service kind;
+//! it defaults to `"main"` when omitted:
+//!
+//! ```ignore
+//! services {
+//!     cas:       Cas { cas_store: nix_store },                 // instance "main"
+//!     other_cas: "other" Cas { cas_store: nix_store },         // instance "other"
+//! }
+//! ```
+//!
 //! ## Store nesting
 //!
 //! Each store binding is registered in the returned [`StoreManager`] under
@@ -149,12 +160,12 @@ pub fn placeholder_sched_spec() -> SchedulerSpec {
 }
 
 /// Wrap a single service config in the `WithInstanceName` vec expected by
-/// the service constructors, using the default `"main"` instance name.
+/// the service constructors, under the given instance name.
 #[doc(hidden)]
 #[must_use]
-pub fn with_instance<T>(config: T) -> Vec<WithInstanceName<T>> {
+pub fn with_instance<T>(instance_name: impl Into<String>, config: T) -> Vec<WithInstanceName<T>> {
     vec![WithInstanceName {
-        instance_name: "main".to_string(),
+        instance_name: instance_name.into(),
         config,
     }]
 }
@@ -300,7 +311,7 @@ macro_rules! topology {
         clock: $clock:expr;
         stores { $( $sname:ident = $skw:ident $({ $($sf:tt)* })? ),* $(,)? }
         schedulers { $( $schname:ident = $schkw:ident { $($schf:tt)* } ),* $(,)? }
-        $( services { $( $svc_name:ident : $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? } )?
+        $( services { $( $svc_name:ident : $( $svc_in:literal )? $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? } )?
     ) => {{
         let store_manager = $crate::__rt::Arc::new($crate::__rt::StoreManager::new());
         let mut action_schedulers: $crate::__rt::HashMap<
@@ -339,11 +350,14 @@ macro_rules! topology {
         // Services (optional): each `@svc` references its store / scheduler
         // dependencies by their binding, so a misspelled name is a compile
         // error, while construction still resolves the names through
-        // `store_manager` / the scheduler maps at runtime.
+        // `store_manager` / the scheduler maps at runtime. The optional
+        // leading string literal sets the service's instance name (default
+        // `"main"`).
         let routes = $crate::__rt::Routes::builder().routes()
             $($(
                 .add_service($crate::__topology_svc!(
                     store_manager, action_schedulers, worker_schedulers,
+                    $crate::__topology_instance_name!($($svc_in)?),
                     $svc_kw { $($svc_f)* }
                 ))
             )*)?;
@@ -596,29 +610,45 @@ macro_rules! __topology_scheduler {
     };
 }
 
+/// Internal: resolve a service's optional instance-name literal to a
+/// concrete name, defaulting to `"main"` when omitted.
+///
+/// See [`__topology_store!`] for why this is an exported-but-hidden helper.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __topology_instance_name {
+    () => {
+        "main"
+    };
+    ($name:literal) => {
+        $name
+    };
+}
+
 /// Internal: construct one tonic service. The leading `let _ = …;` line
 /// ties every store / scheduler dependency to its `topology!` binding so a
 /// misspelled name fails to compile; the constructors still resolve the
-/// names through `store_manager` / the scheduler maps at runtime.
+/// names through `store_manager` / the scheduler maps at runtime. `$name`
+/// is the service's instance name.
 ///
 /// See [`__topology_store!`] for why this is an exported-but-hidden helper.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __topology_svc {
-    ($sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, Cas { cas_store: $cs:ident $(,)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::CasServer::new(
-            &$crate::with_instance($crate::__rt::CasStoreConfig {
+            &$crate::with_instance($name, $crate::__rt::CasStoreConfig {
                 cas_store: stringify!($cs).to_string(),
             }),
             &$sm,
         )?
         .into_service()
     }};
-    ($sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {{
         let _: &$crate::__rt::Store = &$acs;
         $crate::__rt::AcServer::new(
-            &$crate::with_instance($crate::__rt::AcStoreConfig {
+            &$crate::with_instance($name, $crate::__rt::AcStoreConfig {
                 ac_store: stringify!($acs).to_string(),
                 read_only: $ro,
             }),
@@ -626,11 +656,11 @@ macro_rules! __topology_svc {
         )?
         .into_service()
     }};
-    ($sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         let _ = &$sch;
         $crate::__rt::ExecutionServer::new(
-            &$crate::with_instance($crate::__rt::ExecutionConfig {
+            &$crate::with_instance($name, $crate::__rt::ExecutionConfig {
                 cas_store: stringify!($cs).to_string(),
                 scheduler: stringify!($sch).to_string(),
             }),
@@ -639,10 +669,10 @@ macro_rules! __topology_svc {
         )?
         .into_service()
     }};
-    ($sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, Capabilities { scheduler: $sch:ident $(,)? }) => {{
         let _ = &$sch;
         $crate::__rt::CapabilitiesServer::new(
-            &$crate::with_instance($crate::__rt::CapabilitiesConfig {
+            &$crate::with_instance($name, $crate::__rt::CapabilitiesConfig {
                 remote_execution: Some($crate::__rt::CapabilitiesRemoteExecutionConfig {
                     scheduler: stringify!($sch).to_string(),
                 }),
@@ -652,10 +682,10 @@ macro_rules! __topology_svc {
         .await?
         .into_service()
     }};
-    ($sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::ByteStreamServer::new(
-            &$crate::with_instance($crate::__rt::ByteStreamConfig {
+            &$crate::with_instance($name, $crate::__rt::ByteStreamConfig {
                 cas_store: stringify!($cs).to_string()
                 $(, $($rest)*)?
             }),
@@ -666,7 +696,7 @@ macro_rules! __topology_svc {
 
     // Catch-all: an unrecognized service keyword (or wrong fields) produces
     // a readable error.
-    ($sm:ident, $act:ident, $wrk:ident, $other:ident { $($f:tt)* }) => {
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, $other:ident { $($f:tt)* }) => {
         ::core::compile_error!(::core::concat!(
             "`topology!`: unknown service kind `",
             ::core::stringify!($other),

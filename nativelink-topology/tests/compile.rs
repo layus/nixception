@@ -84,6 +84,8 @@ async fn compile_all_services() -> Result<(), nativelink_error::Error> {
                 max_bytes_per_stream: 0,
                 persist_stream_on_disconnect_timeout: 0,
             },
+            // Optional instance-name literal (defaults to "main" otherwise).
+            other_cas:    "other_instance" Cas { cas_store: mem },
         }
     };
     Ok(())
