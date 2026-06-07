@@ -18,7 +18,8 @@ use std::time::SystemTime;
 use crate::runner_info::RunnerInfo;
 
 use nativelink_config::schedulers::{
-    ExperimentalSimpleSchedulerBackend, NixProxySpec, SchedulerSpec, SimpleSpec,
+    CacheLookupSpec, ExperimentalSimpleSchedulerBackend, GrpcSpec, NixProxySpec,
+    PropertyModifierSpec, SchedulerSpec, SimpleSpec,
 };
 use nativelink_config::stores::EvictionPolicy;
 use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
@@ -68,29 +69,18 @@ fn inner_scheduler_factory(
         SchedulerSpec::Simple(spec) => {
             simple_scheduler_factory(spec, store_manager, SystemTime::now, maybe_origin_event_tx)?
         }
-        SchedulerSpec::Grpc(spec) => (Some(Arc::new(GrpcScheduler::new(spec)?)), None),
+        SchedulerSpec::Grpc(spec) => grpc_scheduler_factory(spec)?,
         SchedulerSpec::CacheLookup(spec) => {
-            let ac_store = store_manager
-                .get_store(&spec.ac_store)
-                .err_tip(|| format!("'ac_store': '{}' does not exist", spec.ac_store))?;
-            let (action_scheduler, worker_scheduler) =
+            let nested =
                 inner_scheduler_factory(&spec.scheduler, store_manager, maybe_origin_event_tx)
                     .err_tip(|| "In nested CacheLookupScheduler construction")?;
-            let cache_lookup_scheduler = Arc::new(CacheLookupScheduler::new(
-                ac_store,
-                action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
-            )?);
-            (Some(cache_lookup_scheduler), worker_scheduler)
+            cache_lookup_scheduler_factory(spec, store_manager, nested)?
         }
         SchedulerSpec::PropertyModifier(spec) => {
-            let (action_scheduler, worker_scheduler) =
+            let nested =
                 inner_scheduler_factory(&spec.scheduler, store_manager, maybe_origin_event_tx)
                     .err_tip(|| "In nested PropertyModifierScheduler construction")?;
-            let property_modifier_scheduler = Arc::new(PropertyModifierScheduler::new(
-                spec,
-                action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
-            ));
-            (Some(property_modifier_scheduler), worker_scheduler)
+            property_modifier_scheduler_factory(spec, nested)?
         }
         SchedulerSpec::NixProxy(spec) => {
             nix_scheduler_factory(spec, store_manager, SystemTime::now)?
@@ -100,7 +90,50 @@ fn inner_scheduler_factory(
     Ok(scheduler)
 }
 
-fn simple_scheduler_factory(
+/// Construct a [`GrpcScheduler`] (action scheduler only).
+pub fn grpc_scheduler_factory(spec: &GrpcSpec) -> Result<SchedulerFactoryResults, Error> {
+    Ok((Some(Arc::new(GrpcScheduler::new(spec)?)), None))
+}
+
+/// Wrap an already-constructed nested scheduler in a [`CacheLookupScheduler`].
+///
+/// `nested` is the result of building `spec.scheduler`; callers (the runtime
+/// dispatch and the `topology!` macro) build it first and pass it in so the
+/// assembly logic lives in a single place.
+pub fn cache_lookup_scheduler_factory(
+    spec: &CacheLookupSpec,
+    store_manager: &StoreManager,
+    nested: SchedulerFactoryResults,
+) -> Result<SchedulerFactoryResults, Error> {
+    let ac_store = store_manager
+        .get_store(&spec.ac_store)
+        .err_tip(|| format!("'ac_store': '{}' does not exist", spec.ac_store))?;
+    let (action_scheduler, worker_scheduler) = nested;
+    let cache_lookup_scheduler = Arc::new(CacheLookupScheduler::new(
+        ac_store,
+        action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
+    )?);
+    Ok((Some(cache_lookup_scheduler), worker_scheduler))
+}
+
+/// Wrap an already-constructed nested scheduler in a
+/// [`PropertyModifierScheduler`].
+///
+/// `nested` is the result of building `spec.scheduler`; see
+/// [`cache_lookup_scheduler_factory`] for the rationale.
+pub fn property_modifier_scheduler_factory(
+    spec: &PropertyModifierSpec,
+    nested: SchedulerFactoryResults,
+) -> Result<SchedulerFactoryResults, Error> {
+    let (action_scheduler, worker_scheduler) = nested;
+    let property_modifier_scheduler = Arc::new(PropertyModifierScheduler::new(
+        spec,
+        action_scheduler.err_tip(|| "Nested scheduler is not an action scheduler")?,
+    ));
+    Ok((Some(property_modifier_scheduler), worker_scheduler))
+}
+
+pub fn simple_scheduler_factory(
     spec: &SimpleSpec,
     store_manager: &StoreManager,
     now_fn: fn() -> SystemTime,
@@ -163,7 +196,7 @@ fn simple_scheduler_factory(
     }
 }
 
-fn nix_scheduler_factory(
+pub fn nix_scheduler_factory(
     spec: &NixProxySpec,
     store_manager: &StoreManager,
     now_fn: fn() -> SystemTime,

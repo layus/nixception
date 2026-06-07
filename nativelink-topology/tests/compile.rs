@@ -1,0 +1,66 @@
+// Copyright 2024 The NativeLink Authors. All rights reserved.
+//
+// Licensed under the Functional Source License, Version 1.1, Apache 2.0 Future License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    See LICENSE file for details
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Compile-only coverage for every `topology!` arm.
+//!
+//! The functions below are never executed — they exist purely so the
+//! compiler type-checks every store and scheduler arm of the macro (the
+//! arms are only validated when expanded). Building this test crate also
+//! confirms the hermetic `$crate::__rt` paths resolve from an external
+//! crate that imports nothing but the macro itself.
+
+use nativelink_topology::topology;
+
+/// Exercises every store and scheduler arm in a single invocation.
+#[expect(dead_code, reason = "compiled, never executed")]
+async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
+    let (_store_manager, _action_schedulers, _worker_schedulers) = topology! {
+        stores {
+            // Leaf stores (children for the wrappers below).
+            mem = Memory { eviction_policy: None },
+            nop = Noop,
+            nix = Nix { socket_path: None },
+            redis = Redis { ..Default::default() },
+            reference = Ref { ..Default::default() },
+            aws = Aws { ..Default::default() },
+            gcs = Gcs { ..Default::default() },
+            ontap = OntapS3 { ..Default::default() },
+            // Wrapper stores referencing the leaves by name.
+            verify           = Verify { backend: mem, verify_size: false, verify_hash: false },
+            existence        = ExistenceCache { backend: mem, eviction_policy: None },
+            fast_slow        = FastSlow {
+                fast: mem,
+                slow: nop,
+                fast_direction: Default::default(),
+                slow_direction: Default::default(),
+            },
+            size_partition   = SizePartitioning { lower_store: mem, upper_store: nop, size: 0u64 },
+            completeness     = CompletenessChecking { backend: mem, cas_store: nop },
+            shard            = Shard { stores: [mem, nop] },
+        }
+        schedulers {
+            simple    = Simple { ..Default::default() },
+            nix_proxy = NixProxy { ac_store: mem, cas_store: nix },
+            cache     = CacheLookup { ac_store: mem, scheduler: Simple { ..Default::default() } },
+            modifier  = PropertyModifier {
+                scheduler: Simple { ..Default::default() },
+                modifications: vec![],
+            },
+        }
+    };
+    Ok(())
+}
+
+#[test]
+fn it_compiles() {}

@@ -16,41 +16,77 @@
 //! topologies.
 //!
 //! The [`topology!`] macro expands directly to concrete constructor calls
-//! (`NixStore::new`, `NoopStore::new`, `NixScheduler::new`, …) rather than
-//! routing through the runtime `store_factory` / `scheduler_factory`
-//! dispatch on `StoreSpec` / `SchedulerSpec`.  Because only the store and
-//! scheduler types actually referenced at a call site are ever named, the
-//! linker (with LTO) can drop every backend the binary does not use — the
-//! same effect achieved by hand-writing the construction code, but with a
-//! readable, config-like surface syntax.
+//! (`NixStore::new`, `NoopStore::new`, the per-variant scheduler factories,
+//! …) rather than routing through the runtime `store_factory` /
+//! `scheduler_factory` dispatch on `StoreSpec` / `SchedulerSpec`.  Because
+//! only the store and scheduler types actually referenced at a call site
+//! are ever named, the linker (with LTO) can drop every backend the binary
+//! does not use — the same effect achieved by hand-writing the construction
+//! code, but with a readable, config-like surface syntax.
 //!
 //! # Usage
 //!
 //! The macro must be invoked inside an `async` context whose function
-//! returns a `Result<_, E>` where `E: From<nativelink_error::Error>` (the
-//! async store constructors use `.await?`):
+//! returns a `Result<_, E>` where `E: From<nativelink_error::Error>` (some
+//! store constructors and all the scheduler factories use `.await?` / `?`):
 //!
 //! ```ignore
 //! use nativelink_topology::topology;
 //!
 //! let (store_manager, action_schedulers, worker_schedulers) = topology! {
 //!     stores {
-//!         VOID      = Noop,
-//!         NIX_STORE = Nix { socket_path: None },
+//!         void      = Noop,
+//!         nix_store = Nix { socket_path: None },
 //!     }
 //!     schedulers {
-//!         NIX_SCHEDULER = NixProxy { ac_store: VOID, cas_store: NIX_STORE },
+//!         nix_scheduler = NixProxy { ac_store: void, cas_store: nix_store },
 //!     }
 //! };
 //! ```
 //!
-//! Each store binding becomes a typed `let` handle (so, e.g., the
-//! `NixProxy` scheduler can read `cas_store.socket_path()` without a
-//! `downcast`) and is also registered in the returned [`StoreManager`]
-//! under its identifier name. Referencing a store of the wrong type where a
-//! concrete capability is required is therefore a compile error.
+//! ## Store nesting
+//!
+//! Each store binding is registered in the returned [`StoreManager`] under
+//! its identifier name.  Wrapper stores (`FastSlow`, `Verify`, `Dedup`, …)
+//! refer to their child stores **by name**, so a child must be declared as
+//! its own binding earlier in the `stores { … }` block:
+//!
+//! ```ignore
+//! stores {
+//!     fast_fs   = Filesystem { content_path: "…", temp_path: "…", eviction_policy: None },
+//!     nix_store = Nix { socket_path: None },
+//!     cache     = FastSlow { fast: fast_fs, slow: nix_store,
+//!                            fast_direction: Default::default(),
+//!                            slow_direction: Default::default() },
+//! }
+//! ```
+//!
+//! For wrapper stores the child-store fields are written with a store name;
+//! every *other* field of the underlying spec must be supplied verbatim
+//! (the macro does not guess defaults).
 //!
 //! [`StoreManager`]: nativelink_store::store_manager::StoreManager
+
+use nativelink_config::schedulers::{SchedulerSpec, SimpleSpec};
+use nativelink_config::stores::{NoopSpec, StoreSpec};
+
+/// Placeholder store spec used to fill the (otherwise unused) child-store
+/// fields of a wrapper spec when the child stores are passed to the
+/// constructor directly.  The wrapper constructors ignore these fields.
+#[doc(hidden)]
+#[must_use]
+pub fn placeholder_store_spec() -> StoreSpec {
+    StoreSpec::Noop(NoopSpec {})
+}
+
+/// Placeholder scheduler spec used to fill the (otherwise unused) nested
+/// `scheduler` field of a wrapper scheduler spec when the nested scheduler
+/// is built separately and passed to the factory directly.
+#[doc(hidden)]
+#[must_use]
+pub fn placeholder_sched_spec() -> SchedulerSpec {
+    SchedulerSpec::Simple(SimpleSpec::default())
+}
 
 /// Hermetic re-exports used by the [`topology!`] macro expansion.
 ///
@@ -64,21 +100,43 @@ pub mod __rt {
     pub use std::sync::Arc;
     pub use std::time::SystemTime;
 
-    pub use nativelink_config::schedulers::NixProxySpec;
-    pub use nativelink_config::stores::{FilesystemSpec, MemorySpec, NixSpec};
-    pub use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
-    pub use nativelink_scheduler::nix_scheduler::NixScheduler;
-    pub use nativelink_scheduler::runner_info::RunnerInfo;
+    pub use nativelink_config::schedulers::{
+        CacheLookupSpec, GrpcSpec as SchedGrpcSpec, NixProxySpec, PropertyModifierSpec, SimpleSpec,
+    };
+    pub use nativelink_config::stores::{
+        CompressionSpec, DedupSpec, ExistenceCacheSpec, ExperimentalAwsSpec, ExperimentalGcsSpec,
+        ExperimentalMongoSpec, ExperimentalOntapS3Spec, FastSlowSpec, FilesystemSpec,
+        GrpcSpec as StoreGrpcSpec, MemorySpec, NixSpec, OntapS3ExistenceCacheSpec, RedisSpec,
+        RefSpec, ShardConfig, ShardSpec, SizePartitioningSpec, VerifySpec,
+    };
+    pub use nativelink_scheduler::default_scheduler_factory::{
+        cache_lookup_scheduler_factory, grpc_scheduler_factory, nix_scheduler_factory,
+        property_modifier_scheduler_factory, simple_scheduler_factory,
+    };
     pub use nativelink_scheduler::worker_scheduler::WorkerScheduler;
+    pub use nativelink_store::completeness_checking_store::CompletenessCheckingStore;
+    pub use nativelink_store::compression_store::CompressionStore;
+    pub use nativelink_store::dedup_store::DedupStore;
+    pub use nativelink_store::existence_cache_store::ExistenceCacheStore;
+    pub use nativelink_store::fast_slow_store::FastSlowStore;
     pub use nativelink_store::filesystem_store::FilesystemStore;
+    pub use nativelink_store::gcs_store::GcsStore;
+    pub use nativelink_store::grpc_store::GrpcStore;
     pub use nativelink_store::memory_store::MemoryStore;
-    pub use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
+    pub use nativelink_store::mongo_store::ExperimentalMongoStore;
     pub use nativelink_store::nix_store::NixStore;
     pub use nativelink_store::noop_store::NoopStore;
+    pub use nativelink_store::ontap_s3_existence_cache_store::OntapS3ExistenceCache;
+    pub use nativelink_store::ontap_s3_store::OntapS3Store;
+    pub use nativelink_store::redis_store::RedisStore;
+    pub use nativelink_store::ref_store::RefStore;
+    pub use nativelink_store::s3_store::S3Store;
+    pub use nativelink_store::shard_store::ShardStore;
+    pub use nativelink_store::size_partitioning_store::SizePartitioningStore;
     pub use nativelink_store::store_manager::StoreManager;
+    pub use nativelink_store::verify_store::VerifyStore;
     pub use nativelink_util::operation_state_manager::ClientStateManager;
     pub use nativelink_util::store_trait::Store;
-    pub use tokio::sync::Notify;
 }
 
 /// Construct a nativelink store and scheduler topology.
@@ -106,80 +164,215 @@ macro_rules! topology {
             $crate::__rt::Arc<dyn $crate::__rt::WorkerScheduler>,
         > = $crate::__rt::HashMap::new();
 
-        // Stores: each becomes a typed `let` handle and a named registration.
+        // Stores: each becomes a named `Store` binding usable by later
+        // (wrapper) stores and registered in the store manager.
         $(
-            let $sname = $crate::topology!(@store $skw $({ $($sf)* })?);
-            store_manager.add_store(
-                stringify!($sname),
-                $crate::__rt::Store::new($sname.clone()),
-            );
+            let $sname: $crate::__rt::Store =
+                $crate::topology!(@store store_manager, $skw $({ $($sf)* })?);
+            store_manager.add_store(stringify!($sname), $sname.clone());
         )*
 
-        // Schedulers: inserted into both the action and worker maps.
+        // Schedulers: delegate to the shared per-variant leaf factories and
+        // insert the results into the action / worker maps.
         $(
-            $crate::topology!(@scheduler
-                name = $schname,
-                action = action_schedulers,
-                worker = worker_schedulers,
-                kw = $schkw { $($schf)* }
-            );
+            let (__action, __worker) =
+                $crate::topology!(@scheduler store_manager, $schkw { $($schf)* });
+            if let Some(__a) = __action {
+                let __a: $crate::__rt::Arc<dyn $crate::__rt::ClientStateManager> = __a;
+                action_schedulers.insert(stringify!($schname).to_string(), __a);
+            }
+            if let Some(__w) = __worker {
+                worker_schedulers.insert(stringify!($schname).to_string(), __w);
+            }
         )*
 
         (store_manager, action_schedulers, worker_schedulers)
     }};
 
-    // ── Store constructors ─────────────────────────────────────────────
-    // Add a new arm here for each store backend the DSL should support.
-    // Only the arms actually referenced by a call site are expanded, so
-    // unused backends stay unreferenced (and droppable by LTO).
-    (@store Noop) => {
-        $crate::__rt::NoopStore::new()
+    // ── Leaf stores ────────────────────────────────────────────────────
+    // The `{ … }` fields are forwarded verbatim into the underlying spec,
+    // so the caller writes valid spec fields directly.
+    (@store $sm:ident, Noop) => {
+        $crate::__rt::Store::new($crate::__rt::NoopStore::new())
     };
-    (@store Memory { $($f:tt)* }) => {
-        $crate::__rt::MemoryStore::new(&$crate::__rt::MemorySpec { $($f)* })
+    (@store $sm:ident, Memory { $($f:tt)* }) => {
+        $crate::__rt::Store::new($crate::__rt::MemoryStore::new(&$crate::__rt::MemorySpec { $($f)* }))
     };
-    (@store Nix { $($f:tt)* }) => {
-        $crate::__rt::NixStore::new(&$crate::__rt::NixSpec { $($f)* }).await?
+    (@store $sm:ident, Nix { $($f:tt)* }) => {
+        $crate::__rt::Store::new($crate::__rt::NixStore::new(&$crate::__rt::NixSpec { $($f)* }).await?)
     };
-    (@store Filesystem { $($f:tt)* }) => {
-        $crate::__rt::FilesystemStore::new(&$crate::__rt::FilesystemSpec { $($f)* }).await?
+    (@store $sm:ident, Filesystem { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            <$crate::__rt::FilesystemStore>::new(&$crate::__rt::FilesystemSpec { $($f)* }).await?,
+        )
+    };
+    (@store $sm:ident, Redis { $($f:tt)* }) => {
+        $crate::__rt::Store::new($crate::__rt::RedisStore::new($crate::__rt::RedisSpec { $($f)* })?)
+    };
+    (@store $sm:ident, Grpc { $($f:tt)* }) => {
+        $crate::__rt::Store::new($crate::__rt::GrpcStore::new(&$crate::__rt::StoreGrpcSpec { $($f)* }).await?)
+    };
+    (@store $sm:ident, Mongo { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            $crate::__rt::ExperimentalMongoStore::new($crate::__rt::ExperimentalMongoSpec { $($f)* }).await?,
+        )
+    };
+    (@store $sm:ident, Aws { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            $crate::__rt::S3Store::new(&$crate::__rt::ExperimentalAwsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
+        )
+    };
+    (@store $sm:ident, Gcs { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            $crate::__rt::GcsStore::new(&$crate::__rt::ExperimentalGcsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
+        )
+    };
+    (@store $sm:ident, OntapS3 { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            $crate::__rt::OntapS3Store::new(&$crate::__rt::ExperimentalOntapS3Spec { $($f)* }, $crate::__rt::SystemTime::now).await?,
+        )
+    };
+    (@store $sm:ident, OntapS3ExistenceCache { $($f:tt)* }) => {
+        $crate::__rt::Store::new(
+            $crate::__rt::OntapS3ExistenceCache::new(&$crate::__rt::OntapS3ExistenceCacheSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
+        )
+    };
+    (@store $sm:ident, Ref { $($f:tt)* }) => {
+        $crate::__rt::Store::new($crate::__rt::RefStore::new(
+            &$crate::__rt::RefSpec { $($f)* },
+            $crate::__rt::Arc::downgrade(&$sm),
+        ))
     };
 
-    // ── Scheduler constructors ─────────────────────────────────────────
-    (@scheduler
-        name = $name:ident,
-        action = $action:ident,
-        worker = $worker:ident,
-        kw = NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }
-    ) => {{
-        let task_change_notify = $crate::__rt::Arc::new($crate::__rt::Notify::new());
-        let awaited_action_db = $crate::__rt::memory_awaited_action_db_factory(
-            0,
-            &task_change_notify,
+    // ── Wrapper stores ─────────────────────────────────────────────────
+    // Child-store fields take the *name* of an earlier store binding; every
+    // remaining spec field must be supplied verbatim after the children.
+    (@store $sm:ident, Verify { backend: $b:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::VerifyStore::new(
+            &$crate::__rt::VerifySpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
+            $b.clone(),
+        ))
+    };
+    (@store $sm:ident, Compression { backend: $b:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::CompressionStore::new(
+            &$crate::__rt::CompressionSpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
+            $b.clone(),
+        )?)
+    };
+    (@store $sm:ident, ExistenceCache { backend: $b:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::ExistenceCacheStore::new(
+            &$crate::__rt::ExistenceCacheSpec { backend: $crate::placeholder_store_spec() $(, $($rest)*)? },
+            $b.clone(),
+        ))
+    };
+    (@store $sm:ident, Dedup { index_store: $i:ident, content_store: $c:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::DedupStore::new(
+            &$crate::__rt::DedupSpec {
+                index_store: $crate::placeholder_store_spec(),
+                content_store: $crate::placeholder_store_spec()
+                $(, $($rest)*)?
+            },
+            $i.clone(),
+            $c.clone(),
+        )?)
+    };
+    (@store $sm:ident, CompletenessChecking { backend: $b:ident, cas_store: $c:ident $(,)? }) => {
+        $crate::__rt::Store::new($crate::__rt::CompletenessCheckingStore::new($b.clone(), $c.clone()))
+    };
+    (@store $sm:ident, FastSlow { fast: $f:ident, slow: $s:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::FastSlowStore::new(
+            &$crate::__rt::FastSlowSpec {
+                fast: $crate::placeholder_store_spec(),
+                slow: $crate::placeholder_store_spec()
+                $(, $($rest)*)?
+            },
+            $f.clone(),
+            $s.clone(),
+        ))
+    };
+    (@store $sm:ident, SizePartitioning { lower_store: $l:ident, upper_store: $u:ident $(, $($rest:tt)*)? }) => {
+        $crate::__rt::Store::new($crate::__rt::SizePartitioningStore::new(
+            &$crate::__rt::SizePartitioningSpec {
+                lower_store: $crate::placeholder_store_spec(),
+                upper_store: $crate::placeholder_store_spec()
+                $(, $($rest)*)?
+            },
+            $l.clone(),
+            $u.clone(),
+        ))
+    };
+    (@store $sm:ident, Shard { stores: [ $($s:ident),* $(,)? ] $(,)? }) => {
+        $crate::__rt::Store::new($crate::__rt::ShardStore::new(
+            &$crate::__rt::ShardSpec {
+                stores: ::std::vec![
+                    $( $crate::__rt::ShardConfig {
+                        // `stringify!($s)` ties this element to the `$s`
+                        // repetition (one placeholder per referenced store)
+                        // without affecting the produced value.
+                        store: {
+                            let _: &str = stringify!($s);
+                            $crate::placeholder_store_spec()
+                        },
+                        weight: None,
+                    } ),*
+                ],
+            },
+            ::std::vec![ $( $s.clone() ),* ],
+        )?)
+    };
+
+    // ── Schedulers ─────────────────────────────────────────────────────
+    // Every arm yields a `SchedulerFactoryResults`
+    // (`(Option<Arc<dyn ClientStateManager>>, Option<Arc<dyn WorkerScheduler>>)`)
+    // by delegating to the shared per-variant leaf factories.
+    (@scheduler $sm:ident, Simple { $($f:tt)* }) => {
+        $crate::__rt::simple_scheduler_factory(
+            &$crate::__rt::SimpleSpec { $($f)* },
+            &$sm,
             $crate::__rt::SystemTime::now,
-        );
-        // `cas_store` is a typed handle, so the daemon socket path is read
-        // directly — no `downcast_ref::<NixStore>` needed.
-        let socket_path = $cas.socket_path().to_string();
-        let nix_connection = $crate::__rt::NixDaemonConnectionPool::new_default(socket_path);
-        let runner_info = $crate::__rt::Arc::new($crate::__rt::RunnerInfo::from_env()?);
-        let nix_proxy_spec = $crate::__rt::NixProxySpec {
-            ac_store: stringify!($ac).to_string(),
-            cas_store: stringify!($cas).to_string(),
-        };
-        let (action_scheduler, worker_scheduler) = $crate::__rt::NixScheduler::new(
-            &nix_proxy_spec,
-            awaited_action_db,
-            task_change_notify,
+            None,
+        )?
+    };
+    (@scheduler $sm:ident, Grpc { $($f:tt)* }) => {
+        $crate::__rt::grpc_scheduler_factory(&$crate::__rt::SchedGrpcSpec { $($f)* })?
+    };
+    (@scheduler $sm:ident, NixProxy { ac_store: $ac:ident, cas_store: $cas:ident $(,)? }) => {
+        $crate::__rt::nix_scheduler_factory(
+            &$crate::__rt::NixProxySpec {
+                ac_store: stringify!($ac).to_string(),
+                cas_store: stringify!($cas).to_string(),
+            },
+            &$sm,
             $crate::__rt::SystemTime::now,
-            $crate::__rt::Store::new($ac.clone()),
-            $crate::__rt::Store::new($cas.clone()),
-            nix_connection,
-            runner_info,
-        );
-        let action_scheduler: $crate::__rt::Arc<dyn $crate::__rt::ClientStateManager> =
-            action_scheduler;
-        $action.insert(stringify!($name).to_string(), action_scheduler);
-        $worker.insert(stringify!($name).to_string(), worker_scheduler);
+        )?
+    };
+    (@scheduler $sm:ident, CacheLookup {
+        ac_store: $ac:ident,
+        scheduler: $inner_kw:ident { $($inner_f:tt)* }
+        $(, $($rest:tt)*)?
+    }) => {{
+        let nested = $crate::topology!(@scheduler $sm, $inner_kw { $($inner_f)* });
+        $crate::__rt::cache_lookup_scheduler_factory(
+            &$crate::__rt::CacheLookupSpec {
+                ac_store: stringify!($ac).to_string(),
+                scheduler: ::std::boxed::Box::new($crate::placeholder_sched_spec())
+                $(, $($rest)*)?
+            },
+            &$sm,
+            nested,
+        )?
+    }};
+    (@scheduler $sm:ident, PropertyModifier {
+        scheduler: $inner_kw:ident { $($inner_f:tt)* }
+        $(, $($rest:tt)*)?
+    }) => {{
+        let nested = $crate::topology!(@scheduler $sm, $inner_kw { $($inner_f)* });
+        $crate::__rt::property_modifier_scheduler_factory(
+            &$crate::__rt::PropertyModifierSpec {
+                scheduler: ::std::boxed::Box::new($crate::placeholder_sched_spec())
+                $(, $($rest)*)?
+            },
+            nested,
+        )?
     }};
 }

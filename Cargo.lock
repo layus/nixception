@@ -2871,6 +2871,7 @@ name = "nativelink-topology"
 version = "0.7.10"
 dependencies = [
  "nativelink-config",
+ "nativelink-error",
  "nativelink-scheduler",
  "nativelink-store",
  "nativelink-util",

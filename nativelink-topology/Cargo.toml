@@ -13,3 +13,6 @@ nativelink-store = { path = "../nativelink-store" }
 nativelink-util = { path = "../nativelink-util" }
 
 tokio = { version = "1.44.1", features = ["sync"], default-features = false }
+
+[dev-dependencies]
+nativelink-error = { path = "../nativelink-error" }
