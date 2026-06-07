@@ -45,6 +45,7 @@ nativelink-error = { path = "nativelink-error" }
 nativelink-scheduler = { path = "nativelink-scheduler" }
 nativelink-service = { path = "nativelink-service" }
 nativelink-store = { path = "nativelink-store" }
+nativelink-topology = { path = "nativelink-topology" }
 nativelink-util = { path = "nativelink-util" }
 nativelink-worker = { path = "nativelink-worker" }
 

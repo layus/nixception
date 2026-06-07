@@ -1,0 +1,15 @@
+#:schema ../tools/cargo-with-detailed-deps.json
+lints.workspace = true
+
+[package]
+edition = "2024"
+name = "nativelink-topology"
+version = "0.7.10"
+
+[dependencies]
+nativelink-config = { path = "../nativelink-config" }
+nativelink-scheduler = { path = "../nativelink-scheduler" }
+nativelink-store = { path = "../nativelink-store" }
+nativelink-util = { path = "../nativelink-util" }
+
+tokio = { version = "1.44.1", features = ["sync"], default-features = false }

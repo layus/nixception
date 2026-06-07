@@ -13,9 +13,6 @@
 // limitations under the License.
 
 use core::net::SocketAddr;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::SystemTime;
 
 use axum::http::Uri;
 use futures::future::{BoxFuture, try_join_all};
@@ -27,36 +24,28 @@ use nativelink_config::cas_server::{
     AcStoreConfig, ByteStreamConfig, CapabilitiesConfig, CapabilitiesRemoteExecutionConfig,
     CasStoreConfig, ExecutionConfig, WithInstanceName,
 };
-use nativelink_config::schedulers::NixProxySpec;
-use nativelink_config::stores::NixSpec;
 use nativelink_error::{Error, ResultExt};
-use nativelink_scheduler::default_scheduler_factory::memory_awaited_action_db_factory;
-use nativelink_scheduler::nix_scheduler::NixScheduler;
-use nativelink_scheduler::runner_info::RunnerInfo;
 use nativelink_service::ac_server::AcServer;
 use nativelink_service::bytestream_server::ByteStreamServer;
 use nativelink_service::capabilities_server::CapabilitiesServer;
 use nativelink_service::cas_server::CasServer;
 use nativelink_service::execution_server::ExecutionServer;
-use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
-use nativelink_store::nix_store::NixStore;
-use nativelink_store::noop_store::NoopStore;
-use nativelink_store::store_manager::StoreManager;
+use nativelink_topology::topology;
 use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::shutdown_guard::ShutdownGuard;
-use nativelink_util::store_trait::{DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG, Store};
+use nativelink_util::store_trait::DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG;
 use nativelink_util::task::TaskExecutor;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot};
 use tonic::service::Routes;
 use tracing::{info, warn};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const VOID: &str = "VOID";
-const NIX_STORE: &str = "NIX_STORE";
-const NIX_SCHEDULER: &str = "NIX_SCHEDULER";
+const VOID: &str = "void";
+const NIX_STORE: &str = "nix_store";
+const NIX_SCHEDULER: &str = "nix_scheduler";
 const INSTANCE: &str = "main";
 
 /// Wrap a config value in a single-element `WithInstanceName` vec using
@@ -72,58 +61,23 @@ async fn inner_main(
     shutdown_tx: broadcast::Sender<ShutdownGuard>,
     scheduler_shutdown_tx: oneshot::Sender<()>,
 ) -> Result<(), Error> {
-    // ── Stores ──────────────────────────────────────────────────────────
-    let store_manager = Arc::new(StoreManager::new());
-
-    store_manager.add_store(VOID, Store::new(NoopStore::new()));
-
-    let nix_store = NixStore::new(&NixSpec { socket_path: None })
-        .await
-        .err_tip(|| "Failed to create NIX_STORE")?;
-    let scheduler_socket_path = nix_store.socket_path().to_string();
-    store_manager.add_store(NIX_STORE, Store::new(nix_store));
-
-    // Create a *separate* connection pool for the scheduler so that
-    // store operations and scheduler/worker operations each have their
-    // own pool of daemon connections.
-    let nix_connection = NixDaemonConnectionPool::new_default(scheduler_socket_path);
-
-    // ── Runner info ────────────────────────────────────────────────────
-    let runner_info = Arc::new(
-        RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
-    );
-
-    // ── Scheduler ──────────────────────────────────────────────────────
-    let nix_proxy_spec = NixProxySpec {
-        ac_store: VOID.to_string(),
-        cas_store: NIX_STORE.to_string(),
+    // ── Stores & scheduler ──────────────────────────────────────────────
+    // The `topology!` DSL expands to direct `NoopStore::new` / `NixStore::new`
+    // / `NixScheduler::new` calls, so only these backends are referenced and
+    // the linker can drop every unused store/scheduler under LTO.
+    let (store_manager, action_schedulers, mut worker_schedulers) = topology! {
+        stores {
+            void = Noop,
+            nix_store = Nix { socket_path: None },
+        }
+        schedulers {
+            nix_scheduler = NixProxy { ac_store: void, cas_store: nix_store },
+        }
     };
 
-    let task_change_notify = Arc::new(Notify::new());
-    let awaited_action_db =
-        memory_awaited_action_db_factory(0, &task_change_notify, SystemTime::now);
-
-    let ac_store = store_manager
-        .get_store(VOID)
-        .err_tip(|| "'VOID' store not found")?;
-    let cas_store = store_manager
-        .get_store(NIX_STORE)
-        .err_tip(|| "'NIX_STORE' store not found")?;
-
-    let (action_scheduler, worker_scheduler) = NixScheduler::new(
-        &nix_proxy_spec,
-        awaited_action_db,
-        task_change_notify,
-        SystemTime::now,
-        ac_store,
-        cas_store,
-        nix_connection,
-        runner_info,
-    );
-
-    let action_scheduler: Arc<dyn nativelink_util::operation_state_manager::ClientStateManager> =
-        action_scheduler;
-    let action_schedulers = HashMap::from([(NIX_SCHEDULER.to_string(), action_scheduler)]);
+    let worker_scheduler = worker_schedulers
+        .remove(NIX_SCHEDULER)
+        .expect("nix_scheduler worker scheduler must exist");
 
     // ── Services ───────────────────────────────────────────────────────
     let cas_cfg = with_instance(CasStoreConfig {
