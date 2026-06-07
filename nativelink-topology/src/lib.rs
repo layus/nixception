@@ -28,12 +28,14 @@
 //!
 //! The macro must be invoked inside an `async` context whose function
 //! returns a `Result<_, E>` where `E: From<nativelink_error::Error>` (some
-//! store constructors and all the scheduler factories use `.await?` / `?`):
+//! store constructors and all the scheduler factories use `.await?` / `?`).
+//! It evaluates to a [`Topology`] holding the store manager, the scheduler
+//! maps, and the (optional) tonic [`Routes`]:
 //!
 //! ```ignore
 //! use nativelink_topology::topology;
 //!
-//! let (store_manager, action_schedulers, worker_schedulers) = topology! {
+//! let topology = topology! {
 //!     stores {
 //!         void      = Noop,
 //!         nix_store = Nix { socket_path: None },
@@ -41,8 +43,22 @@
 //!     schedulers {
 //!         nix_scheduler = NixProxy { ac_store: void, cas_store: nix_store },
 //!     }
+//!     services {
+//!         cas:       Cas { cas_store: nix_store },
+//!         execution: Execution { cas_store: nix_store, scheduler: nix_scheduler },
+//!     }
 //! };
+//! let router = topology.routes.into_axum_router();
 //! ```
+//!
+//! ## Services
+//!
+//! The `services { … }` block is optional.  Because stores, schedulers and
+//! services share a single expansion scope, every store / scheduler a
+//! service refers to is checked against its declaration **at compile time**
+//! (a misspelled name is an `E0425`), even though the service constructors
+//! still resolve those names through the [`StoreManager`] / scheduler maps
+//! at runtime.
 //!
 //! ## Store nesting
 //!
@@ -67,9 +83,52 @@
 //!
 //! [`StoreManager`]: nativelink_store::store_manager::StoreManager
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use nativelink_config::cas_server::WithInstanceName;
 use nativelink_config::schedulers::{SchedulerSpec, SimpleSpec};
 use nativelink_config::stores::{NoopSpec, StoreSpec};
+use nativelink_scheduler::worker_scheduler::WorkerScheduler;
+use nativelink_store::store_manager::StoreManager;
+use nativelink_util::operation_state_manager::ClientStateManager;
+use tonic::service::Routes;
+
+/// The fully-constructed store / scheduler / service topology produced by
+/// the [`topology!`] macro.
+///
+/// The `routes` field is built from the optional `services { … }` block; it
+/// is an empty [`Routes`] when that block is omitted.
+pub struct Topology {
+    /// Registry of every named store declared in the `stores { … }` block.
+    pub store_manager: Arc<StoreManager>,
+    /// Action schedulers keyed by the names in the `schedulers { … }` block.
+    pub action_schedulers: HashMap<String, Arc<dyn ClientStateManager>>,
+    /// Worker schedulers keyed by the names in the `schedulers { … }` block.
+    pub worker_schedulers: HashMap<String, Arc<dyn WorkerScheduler>>,
+    /// Tonic routing builder populated from the optional `services { … }`
+    /// block, ready for `.into_axum_router()`.
+    pub routes: Routes,
+}
+
+impl core::fmt::Debug for Topology {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The scheduler trait objects are not `Debug`, so report their
+        // registered names instead.
+        f.debug_struct("Topology")
+            .field("store_manager", &self.store_manager)
+            .field(
+                "action_schedulers",
+                &self.action_schedulers.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "worker_schedulers",
+                &self.worker_schedulers.keys().collect::<Vec<_>>(),
+            )
+            .field("routes", &self.routes)
+            .finish()
+    }
+}
 
 /// Placeholder store spec used to fill the (otherwise unused) child-store
 /// fields of a wrapper spec when the child stores are passed to the
@@ -161,20 +220,20 @@ pub mod __rt {
     pub use tonic::service::Routes;
 }
 
-/// Construct a nativelink store and scheduler topology.
+/// Construct a nativelink store, scheduler and service topology.
 ///
 /// See the [crate-level documentation](crate) for the full surface syntax,
 /// invocation requirements, and rationale.
 ///
-/// Expands to a block evaluating to the tuple
-/// `(Arc<StoreManager>, HashMap<String, Arc<dyn ClientStateManager>>,
-/// HashMap<String, Arc<dyn WorkerScheduler>>)`.
+/// Expands to a block evaluating to a [`Topology`]. The `services { … }`
+/// block is optional; when omitted, [`Topology::routes`] is empty.
 #[macro_export]
 macro_rules! topology {
     // ── Entry point ────────────────────────────────────────────────────
     (
         stores { $( $sname:ident = $skw:ident $({ $($sf:tt)* })? ),* $(,)? }
         schedulers { $( $schname:ident = $schkw:ident { $($schf:tt)* } ),* $(,)? }
+        $( services { $( $svc_name:ident : $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? } )?
     ) => {{
         let store_manager = $crate::__rt::Arc::new($crate::__rt::StoreManager::new());
         let mut action_schedulers: $crate::__rt::HashMap<
@@ -187,28 +246,47 @@ macro_rules! topology {
         > = $crate::__rt::HashMap::new();
 
         // Stores: each becomes a named `Store` binding usable by later
-        // (wrapper) stores and registered in the store manager.
+        // (wrapper) stores and services, and registered in the store manager.
         $(
             let $sname: $crate::__rt::Store =
                 $crate::topology!(@store store_manager, $skw $({ $($sf)* })?);
             store_manager.add_store(stringify!($sname), $sname.clone());
         )*
 
-        // Schedulers: delegate to the shared per-variant leaf factories and
-        // insert the results into the action / worker maps.
+        // Schedulers: bind the per-variant factory results under each
+        // scheduler's own name (so later service references can be
+        // name-checked by the compiler), then populate the action / worker
+        // maps from them.
         $(
-            let (__action, __worker) =
+            let $schname =
                 $crate::topology!(@scheduler store_manager, $schkw { $($schf)* });
-            if let Some(__a) = __action {
+            if let Some(__a) = $schname.0.clone() {
                 let __a: $crate::__rt::Arc<dyn $crate::__rt::ClientStateManager> = __a;
                 action_schedulers.insert(stringify!($schname).to_string(), __a);
             }
-            if let Some(__w) = __worker {
+            if let Some(__w) = $schname.1.clone() {
                 worker_schedulers.insert(stringify!($schname).to_string(), __w);
             }
         )*
 
-        (store_manager, action_schedulers, worker_schedulers)
+        // Services (optional): each `@svc` references its store / scheduler
+        // dependencies by their binding, so a misspelled name is a compile
+        // error, while construction still resolves the names through
+        // `store_manager` / the scheduler maps at runtime.
+        let routes = $crate::__rt::Routes::builder().routes()
+            $($(
+                .add_service($crate::topology!(
+                    @svc store_manager, action_schedulers, worker_schedulers,
+                    $svc_kw { $($svc_f)* }
+                ))
+            )*)?;
+
+        $crate::Topology {
+            store_manager,
+            action_schedulers,
+            worker_schedulers,
+            routes,
+        }
     }};
 
     // ── Leaf stores ────────────────────────────────────────────────────
@@ -397,62 +475,14 @@ macro_rules! topology {
             nested,
         )?
     }};
-}
 
-/// Assemble a tonic [`Routes`] builder from a set of gRPC services.
-///
-/// Companion to [`topology!`]: given the `store_manager`,
-/// `action_schedulers`, and `worker_schedulers` it produced, this builds
-/// the cache / execution gRPC services and wires them into a routing
-/// builder ready for `.into_axum_router()`.
-///
-/// Store and scheduler dependencies are referenced **by name** (the
-/// identifiers used in the `topology!` `stores` / `schedulers` blocks).
-///
-/// Like [`topology!`], it must be invoked in an `async` context returning a
-/// `Result<_, E>` where `E: From<nativelink_error::Error>` (the service
-/// constructors use `?`, and `Capabilities` is `async`).
-///
-/// ```ignore
-/// let routes = services! {
-///     stores: store_manager,
-///     action_schedulers: action_schedulers,
-///     worker_schedulers: worker_schedulers,
-///     services {
-///         cas:          Cas { cas_store: nix_store },
-///         ac:           Ac { ac_store: void, read_only: false },
-///         execution:    Execution { cas_store: nix_store, scheduler: nix_scheduler },
-///         capabilities: Capabilities { scheduler: nix_scheduler },
-///         bytestream:   ByteStream { cas_store: nix_store,
-///                                    max_bytes_per_stream: 0,
-///                                    persist_stream_on_disconnect_timeout: 0 },
-///     }
-/// };
-/// let svc = routes.into_axum_router();
-/// ```
-///
-/// [`Routes`]: tonic::service::Routes
-#[macro_export]
-macro_rules! services {
-    (
-        stores: $sm:ident,
-        action_schedulers: $act:ident,
-        worker_schedulers: $wrk:ident,
-        services { $( $svc_name:ident : $svc_kw:ident { $($svc_f:tt)* } ),* $(,)? }
-    ) => {{
-        // Silence "unused" when a particular dependency map is not consumed
-        // by the selected services.
-        let _ = (&$sm, &$act, &$wrk);
-        $crate::__rt::Routes::builder()
-            .routes()
-            $(
-                .add_service(
-                    $crate::services!(@svc $sm, $act, $wrk, $svc_kw { $($svc_f)* })
-                )
-            )*
-    }};
-
-    (@svc $sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {
+    // ── Services ───────────────────────────────────────────────────────
+    // Each arm yields a tonic service. The leading `let _ = …;` line ties
+    // every store / scheduler dependency to its `topology!` binding so a
+    // misspelled name fails to compile; the constructors still resolve the
+    // names through `store_manager` / the scheduler maps at runtime.
+    (@svc $sm:ident, $act:ident, $wrk:ident, Cas { cas_store: $cs:ident $(,)? }) => {{
+        let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::CasServer::new(
             &$crate::with_instance($crate::__rt::CasStoreConfig {
                 cas_store: stringify!($cs).to_string(),
@@ -460,8 +490,9 @@ macro_rules! services {
             &$sm,
         )?
         .into_service()
-    };
-    (@svc $sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {
+    }};
+    (@svc $sm:ident, $act:ident, $wrk:ident, Ac { ac_store: $acs:ident, read_only: $ro:expr $(,)? }) => {{
+        let _: &$crate::__rt::Store = &$acs;
         $crate::__rt::AcServer::new(
             &$crate::with_instance($crate::__rt::AcStoreConfig {
                 ac_store: stringify!($acs).to_string(),
@@ -470,8 +501,10 @@ macro_rules! services {
             &$sm,
         )?
         .into_service()
-    };
-    (@svc $sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {
+    }};
+    (@svc $sm:ident, $act:ident, $wrk:ident, Execution { cas_store: $cs:ident, scheduler: $sch:ident $(,)? }) => {{
+        let _: &$crate::__rt::Store = &$cs;
+        let _ = &$sch;
         $crate::__rt::ExecutionServer::new(
             &$crate::with_instance($crate::__rt::ExecutionConfig {
                 cas_store: stringify!($cs).to_string(),
@@ -481,8 +514,9 @@ macro_rules! services {
             &$sm,
         )?
         .into_service()
-    };
-    (@svc $sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {
+    }};
+    (@svc $sm:ident, $act:ident, $wrk:ident, Capabilities { scheduler: $sch:ident $(,)? }) => {{
+        let _ = &$sch;
         $crate::__rt::CapabilitiesServer::new(
             &$crate::with_instance($crate::__rt::CapabilitiesConfig {
                 remote_execution: Some($crate::__rt::CapabilitiesRemoteExecutionConfig {
@@ -493,8 +527,9 @@ macro_rules! services {
         )
         .await?
         .into_service()
-    };
-    (@svc $sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {
+    }};
+    (@svc $sm:ident, $act:ident, $wrk:ident, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
+        let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::ByteStreamServer::new(
             &$crate::with_instance($crate::__rt::ByteStreamConfig {
                 cas_store: stringify!($cs).to_string()
@@ -503,5 +538,5 @@ macro_rules! services {
             &$sm,
         )?
         .into_service()
-    };
+    }};
 }

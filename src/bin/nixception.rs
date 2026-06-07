@@ -21,7 +21,7 @@ use hyper_util::server::conn::auto;
 use mimalloc::MiMalloc;
 use nativelink::{run_server, tcp_accept_loop};
 use nativelink_error::Error;
-use nativelink_topology::{services, topology};
+use nativelink_topology::topology;
 use nativelink_util::digest_hasher::DigestHasherFunc;
 use nativelink_util::shutdown_guard::ShutdownGuard;
 use nativelink_util::store_trait::DEFAULT_DIGEST_SIZE_HEALTH_CHECK_CFG;
@@ -39,11 +39,11 @@ async fn inner_main(
     shutdown_tx: broadcast::Sender<ShutdownGuard>,
     scheduler_shutdown_tx: oneshot::Sender<()>,
 ) -> Result<(), Error> {
-    // ── Stores & scheduler ──────────────────────────────────────────────
+    // ── Stores, scheduler & services ────────────────────────────────────
     // The `topology!` DSL expands to direct `NoopStore::new` / `NixStore::new`
     // / `NixScheduler::new` calls, so only these backends are referenced and
     // the linker can drop every unused store/scheduler under LTO.
-    let (store_manager, action_schedulers, mut worker_schedulers) = topology! {
+    let mut topo = topology! {
         stores {
             void = Noop,
             nix_store = Nix { socket_path: None },
@@ -51,17 +51,6 @@ async fn inner_main(
         schedulers {
             nix_scheduler = NixProxy { ac_store: void, cas_store: nix_store },
         }
-    };
-
-    let worker_scheduler = worker_schedulers
-        .remove(NIX_SCHEDULER)
-        .expect("nix_scheduler worker scheduler must exist");
-
-    // ── Services ───────────────────────────────────────────────────────
-    let tonic_services = services! {
-        stores: store_manager,
-        action_schedulers: action_schedulers,
-        worker_schedulers: worker_schedulers,
         services {
             cas:          Cas { cas_store: nix_store },
             ac:           Ac { ac_store: void, read_only: false },
@@ -75,7 +64,13 @@ async fn inner_main(
         }
     };
 
-    let svc = tonic_services
+    let worker_scheduler = topo
+        .worker_schedulers
+        .remove(NIX_SCHEDULER)
+        .expect("nix_scheduler worker scheduler must exist");
+
+    let svc = topo
+        .routes
         .into_axum_router()
         .layer(nativelink_util::telemetry::OtlpLayer::new(false))
         .fallback(|uri: Uri| async move {

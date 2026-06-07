@@ -20,12 +20,12 @@
 //! confirms the hermetic `$crate::__rt` paths resolve from an external
 //! crate that imports nothing but the macro itself.
 
-use nativelink_topology::{services, topology};
+use nativelink_topology::topology;
 
 /// Exercises every store and scheduler arm in a single invocation.
 #[expect(dead_code, reason = "compiled, never executed")]
 async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
-    let (_store_manager, _action_schedulers, _worker_schedulers) = topology! {
+    let _topology = topology! {
         stores {
             // Leaf stores (children for the wrappers below).
             mem = Memory { eviction_policy: None },
@@ -62,10 +62,10 @@ async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
     Ok(())
 }
 
-/// Exercises every `services!` arm.
+/// Exercises every `services` arm.
 #[expect(dead_code, reason = "compiled, never executed")]
 async fn compile_all_services() -> Result<(), nativelink_error::Error> {
-    let (store_manager, action_schedulers, worker_schedulers) = topology! {
+    let _topology = topology! {
         stores {
             mem = Memory { eviction_policy: None },
             nop = Noop,
@@ -74,11 +74,6 @@ async fn compile_all_services() -> Result<(), nativelink_error::Error> {
         schedulers {
             nix_scheduler = NixProxy { ac_store: nop, cas_store: nix },
         }
-    };
-    let _routes = services! {
-        stores: store_manager,
-        action_schedulers: action_schedulers,
-        worker_schedulers: worker_schedulers,
         services {
             cas:          Cas { cas_store: mem },
             ac:           Ac { ac_store: nop, read_only: false },
