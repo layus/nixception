@@ -214,6 +214,25 @@ pub(crate) enum PathInfoCacheEntry {
 /// avoid redundant `query_path_info` + `.drv` read operations.
 pub(crate) type PathInfoCache = Arc<RwLock<HashMap<String, PathInfoCacheEntry>>>;
 
+/// RAII guard tracking a single live action in the shared in-flight
+/// gauge.  Created at the start of [`NixWorker::run`] and dropped when
+/// the worker future completes (including on panic/early return), so the
+/// gauge always reflects the number of workers actually alive.
+struct ActionInFlightGuard(Arc<NixceptionStats>);
+
+impl ActionInFlightGuard {
+    fn new(stats: Arc<NixceptionStats>) -> Self {
+        stats.gauge_enter(&stats.actions_in_flight, &stats.actions_in_flight_peak);
+        Self(stats)
+    }
+}
+
+impl Drop for ActionInFlightGuard {
+    fn drop(&mut self) {
+        self.0.gauge_exit(&self.0.actions_in_flight);
+    }
+}
+
 /// A worker that executes a single action end-to-end, reporting every state
 /// transition back to the scheduler through the [`WorkerStateManager`].
 ///
@@ -351,6 +370,7 @@ impl NixWorker {
     /// All outcomes (success, error, timeout) are communicated exclusively
     /// via the [`WorkerStateManager`] — this method returns nothing.
     pub(crate) async fn run(self) {
+        let _inflight = ActionInFlightGuard::new(self.stats.clone());
         let timeout_duration = self.action_info.timeout;
         let result = time::timeout(timeout_duration, self.run_inner()).await;
 
@@ -673,9 +693,13 @@ impl NixWorker {
         let mut resolved_drvs: Vec<ResolvedInputDrv> = Vec::new();
         let mut extra_sources: Vec<StorePath<String>> = Vec::new();
 
-        // Deduplicate by deriver so we don't query/resolve the same .drv
-        // multiple times (different store paths may share a deriver).
-        let mut seen_drvs: BTreeSet<String> = BTreeSet::new();
+        // Deduplicate by (deriver, output name) so that a multi-output
+        // derivation referenced through several of its outputs (e.g. a
+        // package's `out` via NIX_LDFLAGS and its `dev` via an `-I` flag)
+        // contributes *all* of those outputs, while we still avoid pushing
+        // the same (deriver, output) pair twice.  Deduplicating by deriver
+        // alone would drop every output but the first one encountered.
+        let mut seen_outputs: BTreeSet<(String, String)> = BTreeSet::new();
 
         for sp in discovered {
             // Skip paths that are already in input_sources (CAS entries).
@@ -698,7 +722,7 @@ impl NixWorker {
                         hash_derivation_modulo,
                     } => {
                         let drv_abs = drv_store_path.to_absolute_path();
-                        if seen_drvs.insert(drv_abs.clone()) {
+                        if seen_outputs.insert((drv_abs.clone(), output_name.clone())) {
                             hash_cache.insert(drv_abs, *hash_derivation_modulo);
                             resolved_drvs.push(ResolvedInputDrv {
                                 drv_store_path: drv_store_path.clone(),
@@ -767,11 +791,6 @@ impl NixWorker {
             } else {
                 format!("{STORE_DIR_WITH_SLASH}{deriver_str}")
             };
-
-            // Deduplicate by deriver path.
-            if !seen_drvs.insert(drv_abs_path.clone()) {
-                continue;
-            }
 
             // Parse the deriver as a StorePath.
             let drv_store_path =
@@ -888,10 +907,12 @@ impl NixWorker {
                 "Resolved discovered store path to input derivation"
             );
 
-            resolved_drvs.push(ResolvedInputDrv {
-                drv_store_path,
-                output_name,
-            });
+            if seen_outputs.insert((drv_abs_path.clone(), output_name.clone())) {
+                resolved_drvs.push(ResolvedInputDrv {
+                    drv_store_path,
+                    output_name,
+                });
+            }
         }
 
         Ok((resolved_drvs, extra_sources))
