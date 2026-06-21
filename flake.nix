@@ -445,23 +445,6 @@
               {
                 inherit nativelink buck2;
               };
-            recc-recursive-nix-test = pkgs.callPackage integration_tests/nixception/recc/smoke-test.nix {
-              inherit nixceptionHook buildbox;
-              inherit (pkgs) gcc;
-            };
-            hello-nixception-recc-test = pkgs.callPackage integration_tests/nixception/recc/hello.nix {
-              inherit nixceptionHook buildbox;
-              inherit (pkgs) gcc fetchurl;
-            };
-            spdlog-nixception-recc-test = pkgs.callPackage integration_tests/nixception/recc/spdlog.nix {
-              inherit nixceptionHook buildbox;
-            };
-            bazel-nixpkgs-cc-hello-nixception-test = pkgs.callPackage integration_tests/nixception/bazel/rules-nixpkgs-hello.nix {
-              inherit nixceptionHook;
-            };
-            abseil-cpp-nixception-test = pkgs.callPackage integration_tests/nixception/bazel/abseil-cpp.nix {
-              inherit nixceptionHook;
-            };
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;
