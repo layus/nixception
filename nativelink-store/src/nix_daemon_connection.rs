@@ -42,7 +42,7 @@ use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::async_nix_conn::AsyncNixConn;
 
@@ -204,6 +204,38 @@ struct CheckedOutConn {
     conn: AsyncNixConn,
 }
 
+/// RAII guard that decrements an in-flight gauge when dropped.  Created
+/// via [`track`] at the top of each daemon operation so the gauge
+/// reflects work that is actually in progress even across early returns.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Increment `current`, bump `peak` to the running maximum, and return a
+/// guard that decrements `current` on drop.
+fn track<'a>(current: &'a AtomicUsize, peak: &AtomicUsize) -> InFlightGuard<'a> {
+    let now = current.fetch_add(1, Ordering::Relaxed) + 1;
+    peak.fetch_max(now, Ordering::Relaxed);
+    InFlightGuard(current)
+}
+
+/// Snapshot of the pool's in-flight gauges (current value + peak) for
+/// diagnostics.  Returned by [`NixDaemonConnectionPool::gauges`].
+#[derive(Debug, Clone, Copy)]
+pub struct PoolGauges {
+    pub uploads: usize,
+    pub uploads_peak: usize,
+    pub builds: usize,
+    pub builds_peak: usize,
+    pub queries: usize,
+    pub queries_peak: usize,
+    pub max_connections: usize,
+}
+
 // -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
@@ -228,6 +260,22 @@ pub struct NixDaemonConnectionPool {
     /// permit across all `acquire()` calls.  High values indicate
     /// connection pool contention.
     cumulative_sem_wait_us: AtomicU64,
+
+    // ── In-flight gauges (debug instrumentation) ──────────────────────
+    /// The configured connection limit (mirrors the semaphore capacity).
+    max_connections: usize,
+    /// Number of `upload_to_nix_daemon` calls currently in progress.
+    uploads_in_flight: AtomicUsize,
+    /// Peak concurrent uploads observed.
+    uploads_peak: AtomicUsize,
+    /// Number of `build_derivation` calls currently in progress.
+    builds_in_flight: AtomicUsize,
+    /// Peak concurrent builds observed.
+    builds_peak: AtomicUsize,
+    /// Number of `query_path_info` calls currently in progress.
+    queries_in_flight: AtomicUsize,
+    /// Peak concurrent queries observed.
+    queries_peak: AtomicUsize,
 }
 
 impl fmt::Debug for NixDaemonConnectionPool {
@@ -249,6 +297,13 @@ impl NixDaemonConnectionPool {
             semaphore: Semaphore::new(max_connections),
             idle: Mutex::new(Vec::with_capacity(max_connections)),
             cumulative_sem_wait_us: AtomicU64::new(0),
+            max_connections,
+            uploads_in_flight: AtomicUsize::new(0),
+            uploads_peak: AtomicUsize::new(0),
+            builds_in_flight: AtomicUsize::new(0),
+            builds_peak: AtomicUsize::new(0),
+            queries_in_flight: AtomicUsize::new(0),
+            queries_peak: AtomicUsize::new(0),
         });
 
         // Spawn a lightweight background task that drops idle
@@ -301,6 +356,7 @@ impl NixDaemonConnectionPool {
         &self,
         store_path: &str,
     ) -> Result<Option<nix_remote::worker_op::ValidPathInfo>, Error> {
+        let _g = track(&self.queries_in_flight, &self.queries_peak);
         let (_permit, mut checked_out) = self.acquire().await?;
         let conn = &mut checked_out.conn;
 
@@ -341,6 +397,7 @@ impl NixDaemonConnectionPool {
         mut reader: DropCloserReadHalf,
         upload_size: usize,
     ) -> Result<ValidPathInfoWithPath, Error> {
+        let _g = track(&self.uploads_in_flight, &self.uploads_peak);
         let (_permit, mut checked_out) = self.acquire().await?;
         let conn = &mut checked_out.conn;
 
@@ -423,6 +480,7 @@ impl NixDaemonConnectionPool {
         &self,
         drv_path: &str,
     ) -> Result<BuildOutcome, Error> {
+        let _g = track(&self.builds_in_flight, &self.builds_peak);
         let (_permit, mut checked_out) = self.acquire().await?;
         let conn = &mut checked_out.conn;
 
@@ -531,6 +589,20 @@ impl NixDaemonConnectionPool {
     /// contention.
     pub fn cumulative_sem_wait_us(&self) -> u64 {
         self.cumulative_sem_wait_us.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot the current in-flight gauges (uploads/builds/queries,
+    /// each with its observed peak) for diagnostics.
+    pub fn gauges(&self) -> PoolGauges {
+        PoolGauges {
+            uploads: self.uploads_in_flight.load(Ordering::Relaxed),
+            uploads_peak: self.uploads_peak.load(Ordering::Relaxed),
+            builds: self.builds_in_flight.load(Ordering::Relaxed),
+            builds_peak: self.builds_peak.load(Ordering::Relaxed),
+            queries: self.queries_in_flight.load(Ordering::Relaxed),
+            queries_peak: self.queries_peak.load(Ordering::Relaxed),
+            max_connections: self.max_connections,
+        }
     }
 
     /// Acquire a connection from the pool.

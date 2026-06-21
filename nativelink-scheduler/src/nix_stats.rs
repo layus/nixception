@@ -173,6 +173,15 @@ pub struct NixceptionStats {
     /// failed.
     #[metric(help = "Number of actions that exhausted retries")]
     pub retries_exhausted: AtomicU64,
+
+    // ── In-flight gauges (debug instrumentation) ──────────────────
+    /// Current number of in-flight actions (live workers).
+    #[metric(help = "Current number of in-flight actions")]
+    pub actions_in_flight: AtomicU64,
+
+    /// Peak number of concurrently in-flight actions.
+    #[metric(help = "Peak number of concurrently in-flight actions")]
+    pub actions_in_flight_peak: AtomicU64,
 }
 
 impl NixceptionStats {
@@ -186,6 +195,32 @@ impl NixceptionStats {
     #[inline]
     pub fn increment(&self, counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Enter a gauge scope: increment `current` and bump `peak` to the
+    /// running maximum.
+    #[inline]
+    pub fn gauge_enter(&self, current: &AtomicU64, peak: &AtomicU64) {
+        let now = current.fetch_add(1, Ordering::Relaxed) + 1;
+        peak.fetch_max(now, Ordering::Relaxed);
+    }
+
+    /// Exit a gauge scope: decrement `current`.
+    #[inline]
+    pub fn gauge_exit(&self, current: &AtomicU64) {
+        current.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Current in-flight action count.
+    #[inline]
+    pub fn actions_in_flight(&self) -> u64 {
+        self.actions_in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Peak concurrent in-flight action count.
+    #[inline]
+    pub fn actions_in_flight_peak(&self) -> u64 {
+        self.actions_in_flight_peak.load(Ordering::Relaxed)
     }
 
     /// Print a human-readable summary of all cost centers to the

@@ -205,6 +205,39 @@ impl<
             .self_ref
             .set(Arc::downgrade(&worker_scheduler))
             .ok();
+
+        // ── Debug: periodic in-flight gauge sampler ──────────────────
+        // Logs action / upload / build / query concurrency every 2s so it
+        // can be correlated with the cgroup memory peak from the setup
+        // hook's sampler.  Disable by setting NIXCEPTION_DEBUG_GAUGES=0.
+        if std::env::var("NIXCEPTION_DEBUG_GAUGES")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+        {
+            let stats = scheduler.stats.clone();
+            let pool = scheduler.nix_connection.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+                interval.tick().await; // consume the immediate first tick
+                loop {
+                    interval.tick().await;
+                    let g = pool.gauges();
+                    tracing::info!(
+                        actions = stats.actions_in_flight(),
+                        actions_peak = stats.actions_in_flight_peak(),
+                        uploads = g.uploads,
+                        uploads_peak = g.uploads_peak,
+                        builds = g.builds,
+                        builds_peak = g.builds_peak,
+                        queries = g.queries,
+                        queries_peak = g.queries_peak,
+                        max_conns = g.max_connections,
+                        "nixception in-flight gauges"
+                    );
+                }
+            });
+        }
+
         (scheduler, worker_scheduler)
     }
 
@@ -379,6 +412,15 @@ impl<
 
     async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
         let daemon_wait = self.nix_connection.cumulative_sem_wait_us();
+        let g = self.nix_connection.gauges();
+        tracing::info!(
+            actions_peak = self.stats.actions_in_flight_peak(),
+            uploads_peak = g.uploads_peak,
+            builds_peak = g.builds_peak,
+            queries_peak = g.queries_peak,
+            max_conns = g.max_connections,
+            "nixception peak in-flight gauges"
+        );
         self.stats.log_summary();
         self.stats.write_summary_file_with_daemon_wait(daemon_wait);
     }
