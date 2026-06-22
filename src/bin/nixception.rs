@@ -47,12 +47,13 @@ async fn inner_main(
         stores {
             void = Noop,
             nix_store = Nix { socket_path: None },
+            existence_cache = ExistenceCache { backend: nix_store, eviction_policy: None },
         }
         schedulers {
             nix_scheduler = NixProxy { ac_store: void, cas_store: nix_store },
         }
         services {
-            cas:          Cas { cas_store: nix_store },
+            cas:          Cas { cas_store: existence_cache },
             ac:           Ac { ac_store: void, read_only: false },
             execution:    Execution { cas_store: nix_store, scheduler: nix_scheduler },
             capabilities: Capabilities { scheduler: nix_scheduler },
