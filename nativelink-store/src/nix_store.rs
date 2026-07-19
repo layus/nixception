@@ -29,7 +29,7 @@ use nativelink_util::buf_channel::{DropCloserReadHalf, DropCloserWriteHalf};
 use nativelink_util::common::PackedHash;
 use nativelink_util::fs;
 use nativelink_util::health_utils::{HealthStatus, HealthStatusIndicator};
-use nativelink_util::store_trait::{RemoveItemCallback, StoreDriver, StoreKey, UploadSizeInfo};
+use nativelink_util::store_trait::{StoreDriver, StoreKey, UploadSizeInfo};
 
 use nix_compat::nixhash::CAHash;
 use nix_compat::nixhash::NixHash;
@@ -310,11 +310,4 @@ impl StoreDriver for NixStore {
         self
     }
 
-    fn register_remove_callback(
-        self: Arc<Self>,
-        callback: Arc<dyn RemoveItemCallback>,
-    ) -> Result<(), Error> {
-        drop(callback);
-        Ok(())
-    }
 }
