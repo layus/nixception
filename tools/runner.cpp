@@ -183,8 +183,15 @@ static void copy_inputs(const json &manifest) {
         }
 
         // Make the copy writable (store originals are read-only).
-        fs::permissions(target, fs::perms::owner_read | fs::perms::owner_write,
-                        fs::perm_options::add, ec);
+        fs::perms add_perms = fs::perms::owner_read | fs::perms::owner_write;
+        // Restore the REAPI executable bit: CAS blobs are stored by content
+        // digest, so the store copy does not carry per-reference
+        // executability.
+        if (input.value("executable", false)) {
+            add_perms |= fs::perms::owner_exec | fs::perms::group_exec |
+                         fs::perms::others_exec;
+        }
+        fs::permissions(target, add_perms, fs::perm_options::add, ec);
         if (ec) {
             die("cannot chmod input '" + target.string() +
                 "': " + ec.message());

@@ -104,6 +104,7 @@ struct PathEntry {
     path: PathBuf,
     store_path: StorePath<String>,
     digest: DigestInfo,
+    is_executable: bool,
 }
 
 /// Information about a store path's deriver, resolved via the Nix daemon.
@@ -1047,6 +1048,7 @@ impl NixWorker {
                 json!({
                     "store_path": e.store_path.to_absolute_path(),
                     "path": e.path.to_string_lossy(),
+                    "executable": e.is_executable,
                 })
             }).collect::<Vec<_>>(),
             "working_directory": command.working_directory,
@@ -1341,6 +1343,7 @@ impl NixWorker {
                 path: root.join(file.name),
                 store_path: key_to_store_path(&StoreKey::Digest(digest))?,
                 digest,
+                is_executable: file.is_executable,
             });
         }
 
