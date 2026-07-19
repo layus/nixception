@@ -449,9 +449,6 @@
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;
             };
-            generate-stores-config = pkgs.callPackage nativelink-config/generate-stores-config/build.nix {
-              craneLib = craneLibFor pkgs;
-            };
           }
           // (
             # It's not possible to crosscompile to darwin, not even between
@@ -475,7 +472,7 @@
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {
             inherit pkgs;
-            inherit (packages) generate-bazel-rc generate-stores-config;
+            inherit (packages) generate-bazel-rc;
             nightly-rust = pkgs.rust-bin.nightly.${pkgs.lre.nightly-rust.meta.version};
           };
         };

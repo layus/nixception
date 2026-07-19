@@ -2,10 +2,9 @@
   pkgs,
   nightly-rust,
   generate-bazel-rc,
-  generate-stores-config,
   ...
 }: let
-  excludes = ["nativelink-proto/genproto" "native-cli/vendor"];
+  excludes = ["nativelink-proto/genproto" "native-cli/vendor" "^vendor/"];
 in {
   # Default hooks
   check-case-conflicts = {
@@ -230,14 +229,4 @@ in {
   #  args = ["--with-metadata" "." "--exclude" "vendor" "--lol"];
   #  pass_filenames = false;
   #};
-
-  # Generate demo config to test stores.rs comments
-  generate-stores-config = {
-    description = "Generate stores config";
-    enable = true;
-    entry = "${generate-stores-config}/bin/generate-stores-config nativelink-config/src/stores.rs nativelink-config/examples/stores-config.json5";
-    name = "generate-stores-config";
-    files = "nativelink-config/src/stores.rs|nativelink-config/examples/stores-config.json5";
-    pass_filenames = false;
-  };
 }
