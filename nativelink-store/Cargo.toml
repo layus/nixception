@@ -108,10 +108,10 @@ uuid = { version = "1.16.0", default-features = false, features = [
 ] }
 
 [dependencies.nix-compat]
-path = "../../tvix/tvix/nix-compat"
+workspace = true
 
 [dependencies.nix-remote]
-path = "../../nix-remote-rust/nix-remote"
+workspace = true
 
 [dev-dependencies]
 nativelink-macro = { path = "../nativelink-macro" }
