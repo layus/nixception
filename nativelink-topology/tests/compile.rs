@@ -39,12 +39,7 @@ async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
             // Wrapper stores referencing the leaves by name.
             verify           = Verify { backend: mem, verify_size: false, verify_hash: false },
             existence        = ExistenceCache { backend: mem, eviction_policy: None },
-            fast_slow        = FastSlow {
-                fast: mem,
-                slow: nop,
-                fast_direction: Default::default(),
-                slow_direction: Default::default(),
-            },
+            fast_slow        = FastSlow { fast: mem, slow: nop },
             size_partition   = SizePartitioning { lower_store: mem, upper_store: nop, size: 0u64 },
             completeness     = CompletenessChecking { backend: mem, cas_store: nop },
             shard            = Shard { stores: [mem, nop] },

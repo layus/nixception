@@ -82,9 +82,7 @@
 //! stores {
 //!     fast_fs   = Filesystem { content_path: "…", temp_path: "…", eviction_policy: None },
 //!     nix_store = Nix { socket_path: None },
-//!     cache     = FastSlow { fast: fast_fs, slow: nix_store,
-//!                            fast_direction: Default::default(),
-//!                            slow_direction: Default::default() },
+//!     cache     = FastSlow { fast: fast_fs, slow: nix_store },
 //! }
 //! ```
 //!

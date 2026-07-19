@@ -632,7 +632,7 @@ where
     /// looks up the action in the DB and returns the real internal id so
     /// that callers (e.g. the Nix scheduler) can pass it to workers that
     /// need to call [`WorkerStateManager::update_operation`].
-    pub async fn resolve_internal_operation_id(
+    pub(crate) async fn resolve_internal_operation_id(
         &self,
         client_operation_id: &OperationId,
     ) -> Result<OperationId, Error> {
