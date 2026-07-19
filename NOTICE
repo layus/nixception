@@ -1,0 +1,34 @@
+nixception
+Copyright 2026 Guillaume Maudoux
+
+This product is based on NativeLink
+(https://github.com/TraceMachina/nativelink),
+Copyright 2020-2025 Trace Machina, Inc. and The NativeLink Authors,
+licensed under the Apache License, Version 2.0.
+
+nixception derives from the last Apache-2.0 licensed commit of the NativeLink
+repository. Upstream NativeLink is since distributed under the Functional
+Source License, Version 1.1, with an Apache 2.0 Future License grant
+(FSL-1.1-Apache-2.0), under which each upstream release becomes available
+under the Apache License 2.0 two years after its publication. nixception only
+incorporates upstream changes once that grace period has lapsed.
+
+The original NativeLink copyright and license headers are preserved in the
+source files of this repository.
+
+This repository also vendors, as git submodules under vendor/:
+
+  - nix-compat and nix-compat-derive, part of the tvix project
+    (https://cl.tvl.fyi/depot), Copyright The TVL Community, licensed
+    under the GNU General Public License v3.0
+    (see vendor/tvix/tvix/LICENSE).
+
+  - nix-remote-rust (https://github.com/tweag/nix-remote-rust),
+    licensed under the MIT License
+    (see vendor/nix-remote-rust/LICENSE-MIT).
+
+Note on binaries: the nixception executable statically links the GPL-3.0
+licensed nix-compat crate. While the source code in this repository (outside
+vendor/) is available under the Apache License 2.0, binary distributions of
+the nixception executable are therefore governed by the terms of the
+GNU General Public License v3.0.

@@ -617,11 +617,6 @@
               #                    this toolchain via nix for bitwise identical
               #                    binaries across machines.
               export CC=clang
-              export PULUMI_K8S_AWAIT_ALL=true
-              export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
-              export PLAYWRIGHT_NODEJS_PATH=${pkgs.nodePackages_latest.nodejs}
-              export PATH=$HOME/.deno/bin:$PATH
-              deno types > web/platform/utils/deno.d.ts
             ''
             # TODO(palfrey): Generalize this.
             + pkgs.lib.optionalString (system == "x86_64-linux") ''

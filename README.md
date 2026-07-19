@@ -1,138 +1,139 @@
-<div id="logo" align="center">
-  <a href="https://www.nativelink.com">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="web/platform/src/assets/logo-dark.svg" />
-      <source media="(prefers-color-scheme: light)" srcset="web/platform/src/assets/logo-light.svg" />
-      <img alt="NativeLink" src="web/platform/src/assets/logo-light.svg" width="376" height="100" />
-    </picture>
-  </a>
+# nixception
 
-  <br />
-</div>
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Test](https://github.com/layus/nixception/actions/workflows/test.yaml/badge.svg)](https://github.com/layus/nixception/actions/workflows/test.yaml)
 
-<div id="description" align="center">
-  enter the shipstorm
-</div>
+**nixception** turns ordinary build-tool actions into **Nix builds**, using the
+Nix store as a content-addressed cache. It's a server that speaks the
+[Remote Execution API](https://github.com/bazelbuild/remote-apis) (REAPI) and
+translates each remote action it receives — a single `gcc` invocation sent by
+[`recc`](https://gitlab.com/BuildGrid/recc), a [Bazel](https://bazel.build)
+rule — into a Nix derivation, and builds it through the **recursive-nix** daemon.
+Cached results live in the Nix store, so any action is built at most once
+across all consumers.
 
-<br />
-
-
-<div id="badges" align="center">
-
-  [![Homepage](https://img.shields.io/badge/Homepage-8A2BE2)](https://nativelink.com)
-  [![GitHub stars](https://img.shields.io/github/stars/tracemachina/nativelink?style=social)](https://github.com/TraceMachina/nativelink)
-  [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/TraceMachina/nativelink/badge)](https://securityscorecards.dev/viewer/?uri=github.com/TraceMachina/nativelink)
-  [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8050/badge)](https://www.bestpractices.dev/projects/8050)
-  [![Slack](https://img.shields.io/badge/slack--channel-blue?logo=slack)](https://forms.gle/LtaWSixEC6bYi5xF7)
-  [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-</div>
-
-## What's NativeLink?
-
-NativeLink is an efficient, high-performance build cache and remote execution system that accelerates software compilation and testing while reducing infrastructure costs. It optimizes build processes for projects of all sizes by intelligently caching build artifacts and distributing tasks across multiple machines.
-
-NativeLink is trusted in production environments to reduce costs and developer iteration times--handling over **one billion requests** per month for its customers, including large corporations such as **Samsung**.
-
-<p align="center">
-  <a href="https://www.youtube.com/watch?v=WLpqFuyLMUQ">
-      <img src="https://trace-github-resources.s3.us-east-2.amazonaws.com/harper-90-thumbnail.webp" alt="NativeLink Explained in 90 seconds" loading="lazy" width="480" />
-  </a>
-</p>
-
-## 🔑 Key Features
-
-1. **Advanced Build Cache**:
-   - Stores and reuses results of previous build steps for unchanged components
-   - Significantly reduces build times, especially for incremental changes
-
-2. **Efficient Remote Execution**:
-   - Distributes build and test tasks across a network of machines
-   - Parallelizes workloads for faster completion
-   - Utilizes remote resources to offload computational burden from local machines
-   - Ensures consistency with a uniform, controlled build environment
-
-NativeLink seamlessly integrates with build tools that use the Remote Execution protocol, such as [Bazel](https://bazel.build), [Buck2](https://buck2.build), [Goma](https://chromium.googlesource.com/infra/goma/client/), and [Reclient](https://github.com/bazelbuild/reclient). It supports Unix-based operating systems and Windows, ensuring broad compatibility across different development environments.
-
-## 🚀 Quickstart
-
-To start, you can deploy NativeLink as a Docker image (as shown below) or by using our cloud-hosted solution, [NativeLink Cloud](https://app.nativelink.com). It's **FREE** for individuals, open-source projects, and cloud production environments, with support for unlimited team members.
-
-The setups below are **production-grade** installations. See the [contribution docs](https://nativelink.com/docs/contribute/nix/) for instructions on how to build from source with [Bazel](https://nativelink.com/docs/contribute/bazel/), [Cargo](https://nativelink.com/docs/contribute/cargo/), and [Nix](https://nativelink.com/docs/contribute/nix/).
-
-You can find a few example deployments in the [Docs](https://nativelink.com/docs/deployment-examples/kubernetes).
-
-### 📦 Prebuilt images
-
-Fast to spin up, but currently limited to `x86_64` systems. See the [container
-registry](https://github.com/TraceMachina/nativelink/pkgs/container/nativelink)
-for all image tags and the [contribution docs](https://nativelink.com/docs/contribute/nix)
-for how to build the images yourself.
-
-**Linux x86_64**
-
-```bash
-curl -O \
-    https://raw.githubusercontent.com/TraceMachina/nativelink/v0.7.0/nativelink-config/examples/basic_cas.json5
-
-# See https://github.com/TraceMachina/nativelink/pkgs/container/nativelink
-# to find the latest tag
-docker run \
-    -v $(pwd)/basic_cas.json5:/config \
-    -p 50051:50051 \
-    ghcr.io/tracemachina/nativelink:v0.7.0 \
-    config
+```
+ recc / bazel ──REAPI──▶  nixception server  ──recursive-nix──▶  /nix/store
+ (compiler/rule)          (NixStore +                            (CAS + action
+                           NixScheduler +                          cache)
+                           NixWorker)
 ```
 
-**Windows x86_64**
+Because the Nix store is content-addressed, identical actions are built once
+and reused across runs and across projects. The win is a shared, reproducible,
+deduplicated cache for fine-grained build actions (individual compiles, Bazel
+rules) — not just whole packages.
 
-```powershell
-# Download the configuration file
-Invoke-WebRequest `
-    -Uri "https://raw.githubusercontent.com/TraceMachina/nativelink/v0.7.0/nativelink-config/examples/basic_cas.json5" `
-    -OutFile "basic_cas.json5"
+nixception is built on top of
+[NativeLink](https://github.com/TraceMachina/nativelink), an efficient,
+high-performance build cache and remote execution system. See
+[Relationship to NativeLink](#relationship-to-nativelink--licensing) below for
+how the two projects and their licenses relate.
 
-# Run the Docker container
-# Note: Adjust the path if the script is not run from the directory containing basic_cas.json
-docker run `
-    -v ${PWD}/basic_cas.json5:/config `
-    -p 50051:50051 `
-    ghcr.io/tracemachina/nativelink:v0.7.0 `
-    config
+> **Status**: experimental. Interfaces (server topology, setup hook contract,
+> derivation encoding) are still moving.
+
+## How it works
+
+The `nixception` binary (`src/bin/nixception.rs`) is a NativeLink server
+assembled from a custom topology:
+
+- Exposes a REAPI gRPC endpoint on `0.0.0.0:50051` with the **CAS**, **AC**
+  (action cache), **Execution**, **Capabilities** and **ByteStream** services.
+- Backs them with a `NixStore` — the Nix store used directly as the
+  content-addressed store — and a `NixScheduler`.
+
+The translation logic lives in `nativelink-scheduler/src/`:
+
+- **`nix_scheduler.rs`** — receives actions and manages a connection pool to
+  the Nix daemon to avoid per-action overhead and daemon-connection deadlocks.
+- **`nix_worker.rs`** — the heart of the translation. For each action it scans
+  every input for `/nix/store/...` references to discover the action's real
+  store dependencies, prepares a derivation that runs the action's command
+  through a small bash *runner*, realises it via recursive-nix, and collects
+  the outputs back to the client.
+- **`nix_stats.rs`** — lock-free timing statistics per cost center (scanning,
+  preparation, upload, execution, collection), printed on shutdown.
+
+Because every action is realised as a derivation *from inside a Nix build*,
+the server relies on **recursive-nix**: the ability of a build to talk back to
+the Nix daemon (via `/build/.nix-socket`) and realise further derivations.
+
+## Building
+
+The flake uses git submodules (`vendor/`). On Nix ≥ 2.27 they're picked up
+automatically:
+
+```sh
+nix build
+./result/bin/nixception
 ```
 
-### ❄️ Raw executable with Nix
+On older Nix, pass the submodules flag explicitly:
 
-Slower, since it's built from source, but more flexible and supports MacOS.
-Doesn't support native Windows, but works in WSL2.
-
-Make sure your Nix version is recent and supports flakes. For instance, install
-it via the [next-gen nix installer](https://github.com/NixOS/experimental-nix-installer).
-
-> [!CAUTION]
-> Executables built for MacOS are dynamically linked against libraries from Nix
-> and won't work on systems that don't have these libraries present.
-
-**Linux, MacOS, WSL2**
-
-```bash
-curl -O \
-    https://raw.githubusercontent.com/TraceMachina/nativelink/main/nativelink-config/examples/basic_cas.json5
-
-nix run github:TraceMachina/nativelink ./basic_cas.json5
+```sh
+nix build ".?submodules=1#"
 ```
 
-See the [contribution docs](https://nativelink.com/docs/contribute/nix) for further information.
+A development shell with the pinned Rust toolchain is available through
+`nix develop`, and plain `cargo build --release --bin nixception` works inside
+it.
 
-## 🤝 Contributing
+## Using it in a Nix build
 
-Visit our [Contributing](https://github.com/tracemachina/nativelink/blob/main/CONTRIBUTING.md) guide to learn how to contribute to NativeLink. We welcome contributions from developers of all skill levels and backgrounds!
+The intended consumer interface is a nixpkgs **setup hook**
+(`tools/nixception-hook.nix` + `tools/nixception-setup-hook.sh`). Added to
+`nativeBuildInputs`, it starts the server before `configurePhase` and tears it
+down when the build exits:
 
-## 📊 Stats
+```nix
+nativeBuildInputs = [ nixceptionHook ];
+# or, to inject tools into the runner sandbox:
+nativeBuildInputs = [ (nixceptionHook.withPackages [ myCompiler ]) ];
+```
 
-![Alt](https://repobeats.axiom.co/api/embed/d8bfc6d283632c060beaab1e69494c2f7774a548.svg "Repobeats analytics image")
+The consuming derivation needs `requiredSystemFeatures = [ "recursive-nix" ]`.
+Useful environment variables:
 
-## 📜 License
+- `NIXCEPTION_VERBOSE=1` — stream timestamped server output to stderr (by
+  default the log is kept quiet and dumped only on failure).
+- `NIXCEPTION_STATS_FILE` — where the server writes its timing summary.
+- `RUST_LOG` — honored if set.
 
-Copyright 2020–2025 Trace Machina, Inc.
+## Relationship to NativeLink & licensing
 
-Licensed under the Apache 2.0 License, SPDX identifier `Apache-2.0`.
+nixception is a friendly fork of
+[NativeLink](https://github.com/TraceMachina/nativelink) by Trace Machina,
+Inc. and the NativeLink authors. All credit for the underlying build-cache and
+remote-execution infrastructure — the stores, schedulers, services and the
+REAPI implementation this project is assembled from — belongs to them. If you
+need a production-grade build cache or remote execution at scale, use
+[NativeLink](https://github.com/TraceMachina/nativelink); this project serves
+a different, Nix-specific niche.
+
+### Licensing
+
+- This repository is licensed under the
+  **[Apache License 2.0](./LICENSE)**. It's based on the last Apache-2.0
+  licensed commit of upstream NativeLink; the upstream copyright notices are
+  preserved in the source headers, and attribution notices are collected in
+  [NOTICE](./NOTICE).
+- Upstream NativeLink has since moved to dual licensing under the
+  **Functional Source License 1.1 with an Apache 2.0 future grant**
+  (FSL-1.1-Apache-2.0): each upstream release converts to Apache 2.0 two
+  years after its publication.
+- Consequently, nixception tracks upstream **with a lag of two years**: an
+  upstream change is only incorporated here once its FSL grace period has
+  lapsed and it's available under Apache 2.0. Until then, this repository
+  only carries the Apache-licensed base plus the nixception-specific work
+  developed here.
+- The vendored [`nix-compat`](./vendor/tvix) crate (from the tvix project) is
+  **GPL-3.0** and is statically linked into the `nixception` executable, so
+  **binary distributions of `nixception` are governed by the GPLv3** even
+  though the code in this repository is Apache 2.0. See [NOTICE](./NOTICE)
+  for details.
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Security reports: see
+[SECURITY.md](./SECURITY.md).
