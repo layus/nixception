@@ -35,6 +35,8 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@02a151ada4993995686f9ed4f1be7cfbb229e56f # v31
         with:
+          # inputs.self.submodules in flake.nix needs a recent Nix.
+          install_url: https://releases.nixos.org/nix/nix-2.35.1/install
           extra_nix_config: |
             experimental-features = nix-command flakes
 
