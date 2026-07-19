@@ -682,13 +682,17 @@ macro_rules! __topology_svc {
         .await?
         .into_service()
     }};
-    ($sm:ident, $act:ident, $wrk:ident, $name:expr, ByteStream { cas_store: $cs:ident $(, $($rest:tt)*)? }) => {{
+    ($sm:ident, $act:ident, $wrk:ident, $name:expr, ByteStream { cas_store: $cs:ident $(, $field:ident: $val:expr)* $(,)? }) => {{
         let _: &$crate::__rt::Store = &$cs;
         $crate::__rt::ByteStreamServer::new(
-            &$crate::with_instance($name, $crate::__rt::ByteStreamConfig {
-                cas_store: stringify!($cs).to_string()
-                $(, $($rest)*)?
-            }),
+            &$crate::__rt::ByteStreamConfig {
+                cas_stores: ::std::collections::HashMap::from([(
+                    $name.to_string(),
+                    stringify!($cs).to_string(),
+                )]),
+                $($field: $val,)*
+                ..Default::default()
+            },
             &$sm,
         )?
         .into_service()

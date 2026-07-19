@@ -178,7 +178,6 @@ impl<
             Duration::from_secs(DEFAULT_CLIENT_ACTION_TIMEOUT_S),
             awaited_action_db,
             now_fn,
-            None, // no worker registry for nix workers
         );
 
         let stats = Arc::new(NixceptionStats::default());
