@@ -1,9 +1,11 @@
 {
   description = "nativelink";
-  # NOTE: This flake uses git submodules. Build with:
+  # NOTE: This flake uses git submodules (vendor/). `inputs.self.submodules`
+  # makes plain `nix build` include them; on Nix < 2.27 build with:
   #   nix build ".?submodules=1#<target>"
 
   inputs = {
+    self.submodules = true;
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     git-hooks = {
