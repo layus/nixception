@@ -29,7 +29,12 @@
 //! | `derivation_prep_us` | Constructing the action derivation (manifest, environment, hashing) |
 //! | `execute_us` | Executing the derivation via the Nix daemon (`build_derivation`) |
 //! | `collect_outputs_us` | Reading exit code, uploading stdout/stderr/output files to CAS |
-//! | `total_action_us` | End-to-end wall-clock time of `run_inner` |
+//! | `total_action_us` | Sum of every action's end-to-end `run_inner` span |
+//!
+//! Note that `total_action_us` is a **sum** across all (possibly parallel)
+//! actions, so it is *not* wall-clock time — under concurrency it exceeds the
+//! real elapsed time.  The true elapsed time is [`NixceptionStats::wall_clock`]
+//! (server start → now); their ratio is the average parallelism.
 //!
 //! The difference `total_action_us − execute_us` gives the nixception
 //! overhead (input setup + output collection) as opposed to the actual
@@ -210,6 +215,27 @@ pub struct NixceptionStats {
     /// Peak number of concurrently in-flight actions.
     #[metric(help = "Peak number of concurrently in-flight actions")]
     pub actions_in_flight_peak: AtomicU64,
+
+    /// Wall-clock start (server boot).  Set when the stats are constructed;
+    /// `wall_clock()` returns the elapsed time since — the *true* elapsed time
+    /// in the summary, as opposed to `total_action_us`, which is the sum of
+    /// per-action spans and overcounts under parallelism.
+    ///
+    /// Not annotated with `#[metric]`, so the `MetricsComponent` derive skips
+    /// it (only `#[metric]` fields are published).
+    pub start: StartInstant,
+}
+
+/// An [`Instant`] whose [`Default`] is the current time, so `NixceptionStats`
+/// can keep deriving `Default` while stamping its construction moment as the
+/// wall-clock start.
+#[derive(Debug, Clone, Copy)]
+pub struct StartInstant(pub Instant);
+
+impl Default for StartInstant {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
 }
 
 impl NixceptionStats {
@@ -223,6 +249,13 @@ impl NixceptionStats {
     #[inline]
     pub fn increment(&self, counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The true elapsed wall-clock time since the server started (i.e. since
+    /// these stats were constructed).
+    #[inline]
+    pub fn wall_clock(&self) -> Duration {
+        self.start.0.elapsed()
     }
 
     /// Enter a gauge scope: increment `current` and bump `peak` to the
@@ -260,7 +293,8 @@ impl NixceptionStats {
         let succeeded = self.actions_succeeded.load(Ordering::Relaxed);
         let failed = self.actions_failed.load(Ordering::Relaxed);
 
-        let total = Duration::from_micros(self.total_action_us.load(Ordering::Relaxed));
+        let cumulative = Duration::from_micros(self.total_action_us.load(Ordering::Relaxed));
+        let wall = self.wall_clock();
         let upload = Duration::from_micros(self.upload_to_store_us.load(Ordering::Relaxed));
         let scan = Duration::from_micros(self.store_path_scanning_us.load(Ordering::Relaxed));
         let prep = Duration::from_micros(self.derivation_prep_us.load(Ordering::Relaxed));
@@ -268,28 +302,40 @@ impl NixceptionStats {
         let collect = Duration::from_micros(self.collect_outputs_us.load(Ordering::Relaxed));
 
         // "Overhead" is everything that isn't the actual nix build.
-        let overhead = total.saturating_sub(exec);
+        let overhead = cumulative.saturating_sub(exec);
 
         if actions == 0 {
             tracing::debug!("Nixception shutting down — no actions were executed");
             return;
         }
 
+        let parallelism = if wall.as_nanos() > 0 {
+            cumulative.as_secs_f64() / wall.as_secs_f64()
+        } else {
+            0.0
+        };
+        let throughput = if wall.as_nanos() > 0 {
+            actions as f64 / wall.as_secs_f64()
+        } else {
+            0.0
+        };
+
         tracing::debug!(
             actions,
             succeeded,
             failed,
-            total_s = format_args!("{:.3}", total.as_secs_f64()),
+            wall_s = format_args!("{:.3}", wall.as_secs_f64()),
+            cumulative_s = format_args!("{:.3}", cumulative.as_secs_f64()),
+            parallelism = format_args!("{parallelism:.2}"),
+            actions_per_s = format_args!("{throughput:.2}"),
+            peak_parallelism = self.actions_in_flight_peak.load(Ordering::Relaxed),
             upload_s = format_args!("{:.3}", upload.as_secs_f64()),
             scan_s = format_args!("{:.3}", scan.as_secs_f64()),
             prep_s = format_args!("{:.3}", prep.as_secs_f64()),
             exec_s = format_args!("{:.3}", exec.as_secs_f64()),
             collect_s = format_args!("{:.3}", collect.as_secs_f64()),
             overhead_s = format_args!("{:.3}", overhead.as_secs_f64()),
-            avg_total_ms = format_args!("{:.1}", total.as_secs_f64() * 1000.0 / actions as f64),
             avg_exec_ms = format_args!("{:.1}", exec.as_secs_f64() * 1000.0 / actions as f64),
-            avg_overhead_ms =
-                format_args!("{:.1}", overhead.as_secs_f64() * 1000.0 / actions as f64),
             "Nixception cumulative timing statistics"
         );
     }
@@ -318,13 +364,18 @@ impl NixceptionStats {
         let succeeded = self.actions_succeeded.load(Ordering::Relaxed);
         let failed = self.actions_failed.load(Ordering::Relaxed);
 
-        let total = Duration::from_micros(self.total_action_us.load(Ordering::Relaxed));
+        // `cumulative` is the SUM of every action's end-to-end span; with
+        // parallel workers it exceeds the real elapsed time.  `wall` is the
+        // true elapsed wall-clock (server start → now/shutdown).
+        let cumulative = Duration::from_micros(self.total_action_us.load(Ordering::Relaxed));
+        let wall = self.wall_clock();
         let upload = Duration::from_micros(self.upload_to_store_us.load(Ordering::Relaxed));
         let scan = Duration::from_micros(self.store_path_scanning_us.load(Ordering::Relaxed));
         let prep = Duration::from_micros(self.derivation_prep_us.load(Ordering::Relaxed));
         let exec = Duration::from_micros(self.execute_us.load(Ordering::Relaxed));
         let collect = Duration::from_micros(self.collect_outputs_us.load(Ordering::Relaxed));
-        let overhead = total.saturating_sub(exec);
+        let overhead = cumulative.saturating_sub(exec);
+        let peak_parallelism = self.actions_in_flight_peak.load(Ordering::Relaxed);
 
         // Execution breakdown (from the runner's timing.json).
         let nix_latency = Duration::from_micros(self.daemon_to_runner_us.load(Ordering::Relaxed));
@@ -358,12 +409,29 @@ impl NixceptionStats {
         let pi_cache_hits = self.path_info_cache_hits.load(Ordering::Relaxed);
         let pi_cache_misses = self.path_info_cache_misses.load(Ordering::Relaxed);
 
-        let exec_pct = if total.as_nanos() > 0 {
-            exec.as_secs_f64() / total.as_secs_f64() * 100.0
+        // Percentages are of the CUMULATIVE action time (their correct
+        // denominator — they describe how the per-action work splits, not the
+        // wall clock).
+        let exec_pct = if cumulative.as_nanos() > 0 {
+            exec.as_secs_f64() / cumulative.as_secs_f64() * 100.0
         } else {
             0.0
         };
         let overhead_pct = 100.0 - exec_pct;
+
+        // Average parallelism: how much work ran concurrently on average.
+        // cumulative / wall (e.g. 1.9x means ~2 actions ran at once).
+        let parallelism = if wall.as_nanos() > 0 {
+            cumulative.as_secs_f64() / wall.as_secs_f64()
+        } else {
+            0.0
+        };
+        // Throughput: completed actions per second of wall-clock.
+        let throughput = if wall.as_nanos() > 0 {
+            actions as f64 / wall.as_secs_f64()
+        } else {
+            0.0
+        };
 
         let avg = |d: Duration| -> f64 { d.as_secs_f64() * 1000.0 / actions as f64 };
         let fmt_dur = |d: Duration| -> String {
@@ -457,24 +525,39 @@ impl NixceptionStats {
             avg(collect)
         );
         let _ = writeln!(s, "  {}", "─".repeat(60));
+        // Cumulative action time is the SUM of the per-action spans above; its
+        // sub-lines describe how that per-action work splits.
         let _ = writeln!(
             s,
             "  {:.<30} {} ({:>7.1} ms avg)",
-            "Total wall-clock",
-            fmt_dur(total),
-            avg(total)
+            "Cumulative action time",
+            fmt_dur(cumulative),
+            avg(cumulative)
         );
         let _ = writeln!(
             s,
-            "    execution................ {} ({:>5.1}%)",
+            "    execution................ {} ({:>5.1}% of cumulative)",
             fmt_dur(exec),
             exec_pct
         );
         let _ = writeln!(
             s,
-            "    overhead (setup+collect). {} ({:>5.1}%)",
+            "    overhead (setup+collect). {} ({:>5.1}% of cumulative)",
             fmt_dur(overhead),
             overhead_pct
+        );
+        // True elapsed time and how much parallelism it reflects.
+        let _ = writeln!(s, "  {}", "─".repeat(60));
+        let _ = writeln!(s, "  {:.<30} {}", "Wall-clock (elapsed)", fmt_dur(wall));
+        let _ = writeln!(
+            s,
+            "  {:.<30} {:.2}x avg, {} peak",
+            "Parallelism (cum / wall)", parallelism, peak_parallelism
+        );
+        let _ = writeln!(
+            s,
+            "  {:.<30} {:.2} actions/s",
+            "Throughput", throughput
         );
 
         // Sub-step breakdown

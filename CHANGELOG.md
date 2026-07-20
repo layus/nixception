@@ -19,6 +19,13 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   "Action timing breakdown" debug log carries the same split. Reading the
   runner's timing is best-effort, so builds whose runner predates this change
   still work.
+- Fixed the mislabeled "Total wall-clock" line, which was actually the *sum* of
+  every action's span and so overcounted under parallelism. The summary now
+  reports the real elapsed **wall-clock** (server start → shutdown) separately
+  from the renamed **cumulative action time**, and adds **parallelism**
+  (cumulative / wall, average and peak) and **throughput** (actions per second).
+  The execution / overhead percentages are now stated as a fraction of the
+  cumulative time.
 
 ## [0.2.1] - 2026-07-20
 
