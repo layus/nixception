@@ -111,6 +111,18 @@ async fn inner_main(
 }
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
+    // nixception is configured with `NIXCEPTION_LOG` rather than `RUST_LOG`.
+    // The tracing filter (in `nativelink-util`) reads `RUST_LOG`, so bridge the
+    // value across before tracing is initialised. `NIXCEPTION_LOG` takes
+    // precedence when both are set.
+    if let Ok(level) = std::env::var("NIXCEPTION_LOG") {
+        // SAFETY: single-threaded — set before any threads are spawned or
+        // tracing is initialised in `run_server`.
+        unsafe {
+            std::env::set_var("RUST_LOG", level);
+        }
+    }
+
     run_server(
         "nixception",
         512,

@@ -36,9 +36,12 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   peak in-flight gauges, the cumulative timing summary, and the `NixStore` upload
   trace. `info` is now reserved for lifecycle milestones: server ready,
   build-succeeded-after-retry, and orderly shutdown (SIGTERM handling, which was
-  previously logged at `warn`). Set `RUST_LOG=debug` to restore the per-action
-  detail. The human-readable timing summary is unaffected — the setup hook still
-  prints it from `NIXCEPTION_STATS_FILE`.
+  previously logged at `warn`). Set `NIXCEPTION_LOG=debug` to restore the
+  per-action detail. The human-readable timing summary is unaffected — the setup
+  hook still prints it from `NIXCEPTION_STATS_FILE`.
+- The server log level is now configured with `NIXCEPTION_LOG` instead of
+  `RUST_LOG` (same filter syntax; `NIXCEPTION_LOG` takes precedence when both are
+  set). The setup hook sets `NIXCEPTION_LOG` accordingly.
 
 ## [0.1.1] - 2026-07-20
 

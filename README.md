@@ -98,7 +98,8 @@ Useful environment variables:
 - `NIXCEPTION_VERBOSE=1` — stream timestamped server output to stderr (by
   default the log is kept quiet and dumped only on failure).
 - `NIXCEPTION_STATS_FILE` — where the server writes its timing summary.
-- `RUST_LOG` — honored if set.
+- `NIXCEPTION_LOG` — log level / filter (same syntax as `RUST_LOG`); honored
+  if set.
 
 ## Relationship to NativeLink & licensing
 

@@ -218,31 +218,32 @@ nixceptionStartPhase() {
     # time – none of them need to be on PATH.
     # NIXCEPTION_RUNNER_* are scoped to this one invocation via inline assignment.
     #
-    # In verbose mode the default RUST_LOG level is "info" and server output is
-    # timestamped and forwarded to stderr.  In quiet mode the level drops to
-    # "warn" and output goes to a log file that is only shown on failure.
-    # If the caller already set RUST_LOG we never override it.
-    local _rust_log
-    if [ -n "${RUST_LOG:-}" ]; then
-        _rust_log="$RUST_LOG"
+    # nixception reads NIXCEPTION_LOG for its log level.  In verbose mode the
+    # default level is "info" and server output is timestamped and forwarded to
+    # stderr.  In quiet mode the level drops to "warn" and output goes to a log
+    # file that is only shown on failure.  If the caller already set
+    # NIXCEPTION_LOG we never override it.
+    local _nixception_log_level
+    if [ -n "${NIXCEPTION_LOG:-}" ]; then
+        _nixception_log_level="$NIXCEPTION_LOG"
     elif [ "$_verbose" = "1" ]; then
-        _rust_log="info"
+        _nixception_log_level="info"
     else
-        _rust_log="warn"
+        _nixception_log_level="warn"
     fi
 
     _nixception_log "starting nixception server (runner: @runnerOut@)..."
     if [ "$_verbose" = "1" ]; then
         NIXCEPTION_RUNNER_OUT="@runnerOut@" \
             NIXCEPTION_RUNNER_DRV="@runnerDrv@" \
-            RUST_LOG="$_rust_log" \
+            NIXCEPTION_LOG="$_nixception_log_level" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > >(@moreutils@/bin/ts -s '[nixception] %H:%M:%.S' >&2) 2>&1 &
     else
         NIXCEPTION_RUNNER_OUT="@runnerOut@" \
             NIXCEPTION_RUNNER_DRV="@runnerDrv@" \
-            RUST_LOG="$_rust_log" \
+            NIXCEPTION_LOG="$_nixception_log_level" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > "$_logfile" 2>&1 &
