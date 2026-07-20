@@ -139,6 +139,7 @@ in {
   # Rust
   rustfmt = {
     enable = true;
+    inherit excludes;
     packageOverrides.cargo = nightly-rust.cargo;
     packageOverrides.rustfmt = nightly-rust.rustfmt;
   };
