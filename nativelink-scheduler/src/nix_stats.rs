@@ -128,6 +128,26 @@ pub struct NixceptionStats {
     #[metric(help = "Cumulative total action wall-clock time (us)")]
     pub total_action_us: AtomicU64,
 
+    // ── Cache accounting ─────────────────────────────────────────────
+    //
+    // An action is "cached" when the Nix build was served from the store
+    // without the runner running for this build (detected via a missing or
+    // stale $out/timing.json).  These track how much the caching saved.
+
+    /// Number of actions served from the Nix cache (the runner did not run).
+    #[metric(help = "Number of actions served from the cache")]
+    pub actions_cached: AtomicU64,
+
+    /// Cumulative *actual* time cache hits took (the server's `build_derivation`
+    /// wall-clock — small, since nothing was built).
+    #[metric(help = "Cumulative actual time of cache hits (us)")]
+    pub cached_actual_us: AtomicU64,
+
+    /// Cumulative *estimated* time cache hits would have taken had they run:
+    /// the cached record's reported runner runtime plus a sandbox-setup floor.
+    #[metric(help = "Cumulative estimated un-cached cost of cache hits (us)")]
+    pub cached_would_have_us: AtomicU64,
+
     // ── Fine-grained sub-step counters ──────────────────────────────
     //
     // These break down the coarse cost centers above to pinpoint
@@ -329,6 +349,16 @@ impl NixceptionStats {
             parallelism = format_args!("{parallelism:.2}"),
             actions_per_s = format_args!("{throughput:.2}"),
             peak_parallelism = self.actions_in_flight_peak.load(Ordering::Relaxed),
+            cached = self.actions_cached.load(Ordering::Relaxed),
+            cache_saved_s = format_args!(
+                "{:.3}",
+                Duration::from_micros(
+                    self.cached_would_have_us
+                        .load(Ordering::Relaxed)
+                        .saturating_sub(self.cached_actual_us.load(Ordering::Relaxed))
+                )
+                .as_secs_f64()
+            ),
             upload_s = format_args!("{:.3}", upload.as_secs_f64()),
             scan_s = format_args!("{:.3}", scan.as_secs_f64()),
             prep_s = format_args!("{:.3}", prep.as_secs_f64()),
@@ -376,6 +406,14 @@ impl NixceptionStats {
         let collect = Duration::from_micros(self.collect_outputs_us.load(Ordering::Relaxed));
         let overhead = cumulative.saturating_sub(exec);
         let peak_parallelism = self.actions_in_flight_peak.load(Ordering::Relaxed);
+
+        // Cache accounting.
+        let cached = self.actions_cached.load(Ordering::Relaxed);
+        let executed = actions.saturating_sub(cached);
+        let cached_actual = Duration::from_micros(self.cached_actual_us.load(Ordering::Relaxed));
+        let cached_would_have =
+            Duration::from_micros(self.cached_would_have_us.load(Ordering::Relaxed));
+        let cache_saved = cached_would_have.saturating_sub(cached_actual);
 
         // Execution breakdown (from the runner's timing.json).
         let nix_latency = Duration::from_micros(self.daemon_to_runner_us.load(Ordering::Relaxed));
@@ -559,6 +597,33 @@ impl NixceptionStats {
             "  {:.<30} {:.2} actions/s",
             "Throughput", throughput
         );
+
+        // Cache accounting: how many actions were served from the store and the
+        // (estimated) time that saved.  Only shown when some hit the cache.
+        if cached > 0 {
+            let hit_pct = cached as f64 / actions as f64 * 100.0;
+            // Speedup = what the cache hits would have cost / what they did cost.
+            let speedup = if cached_actual.as_nanos() > 0 {
+                cached_would_have.as_secs_f64() / cached_actual.as_secs_f64()
+            } else {
+                0.0
+            };
+            let _ = writeln!(s, "  {}", "─".repeat(60));
+            let _ = writeln!(
+                s,
+                "  {:.<30} {} hit / {} run ({:.1}% cached)",
+                "Cache", cached, executed, hit_pct
+            );
+            let _ = writeln!(
+                s,
+                "  {:.<30} {} (would have cost {}, took {})",
+                "Est. time saved by cache",
+                fmt_dur(cache_saved),
+                fmt_dur(cached_would_have),
+                fmt_dur(cached_actual)
+            );
+            let _ = writeln!(s, "  {:.<30} {:.1}x on cache hits", "Cache speedup", speedup);
+        }
 
         // Sub-step breakdown
         let _ = writeln!(s);
@@ -814,6 +879,40 @@ mod tests {
         stats.record(&stats.derivation_prep_us, Duration::from_millis(100));
         stats.record(&stats.collect_outputs_us, Duration::from_millis(40));
         stats.log_summary();
+    }
+
+    #[test]
+    fn summary_reports_cache_accounting() {
+        let stats = NixceptionStats::default();
+        // 3 actions: 2 cache hits, 1 executed.
+        for _ in 0..3 {
+            stats.increment(&stats.actions_total);
+        }
+        stats.increment(&stats.actions_succeeded);
+        stats.increment(&stats.actions_succeeded);
+        stats.increment(&stats.actions_succeeded);
+        stats.record(&stats.total_action_us, Duration::from_secs(3));
+        stats.record(&stats.execute_us, Duration::from_secs(2));
+
+        // Two cache hits: each took 10ms actually, would have cost 1s.
+        stats.increment(&stats.actions_cached);
+        stats.increment(&stats.actions_cached);
+        stats.record(&stats.cached_actual_us, Duration::from_millis(20)); // 2 × 10ms
+        stats.record(&stats.cached_would_have_us, Duration::from_secs(2)); // 2 × 1s
+
+        let summary = stats
+            .format_summary_with_daemon_wait(0)
+            .expect("summary with actions");
+        assert!(summary.contains("Cache"), "missing cache section:\n{summary}");
+        assert!(
+            summary.contains("2 hit / 1 run"),
+            "wrong hit/run counts:\n{summary}"
+        );
+        // Speedup = would_have (2s) / actual (20ms) = 100x.
+        assert!(
+            summary.contains("100.0x"),
+            "wrong speedup:\n{summary}"
+        );
     }
 
     #[test]

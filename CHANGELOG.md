@@ -26,6 +26,12 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   (cumulative / wall, average and peak) and **throughput** (actions per second).
   The execution / overhead percentages are now stated as a fraction of the
   cumulative time.
+- Distinguish **cached vs executed** actions. An action is detected as a cache
+  hit when its `$out/timing.json` is absent or stale (its recorded runner start
+  predates the server's build request — the runner didn't run for this build).
+  The summary reports the cache hit ratio, the **estimated time the cache
+  saved** (the cached record's runtime plus a conservative 300 ms sandbox-setup
+  floor, minus what the hit actually cost), and the resulting **cache speedup**.
 
 ## [0.2.1] - 2026-07-20
 

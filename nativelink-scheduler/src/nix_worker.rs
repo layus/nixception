@@ -111,16 +111,36 @@ struct PathEntry {
 /// `$out/timing.json`.  All-zero when the runner produced no timing record.
 #[derive(Clone, Copy, Debug, Default)]
 struct RunnerTiming {
+    /// Whether this action was served from the Nix cache (the runner did not
+    /// run for *this* build).  Detected when `timing.json` is missing, or its
+    /// recorded runner start predates the server's build request (a stale
+    /// record from the original execution that the cache hit reused).
+    cached: bool,
     /// Latency from the server's `build_derivation` request to the runner
     /// actually starting inside the sandbox (time spent in nix/the daemon).
+    /// Zero for cached actions.
     daemon_to_runner: Duration,
     /// Runner setup: read manifest, copy inputs, prepare dirs/env.
     setup: Duration,
-    /// The task itself: the exec'd command (fork→waitpid).
+    /// The task itself: the command that ran (fork→waitpid).
     task: Duration,
     /// Runner wrap-up: collect declared outputs.
     wrapup: Duration,
 }
+
+impl RunnerTiming {
+    /// The total time the runner reported for this action (setup + task +
+    /// wrap-up).  For a cache hit, this is the *cached* record's runtime — i.e.
+    /// what running the action would have cost.
+    fn reported_total(&self) -> Duration {
+        self.setup + self.task + self.wrapup
+    }
+}
+
+/// Conservative lower bound on the time a real (non-cached) execution must
+/// spend setting up the Nix build sandbox before the runner starts.  Added to
+/// the runner's reported runtime when estimating the cost a cache hit avoided.
+const SANDBOX_SETUP_FLOOR: Duration = Duration::from_millis(300);
 
 /// Information about a store path's deriver, resolved via the Nix daemon.
 ///
@@ -470,10 +490,11 @@ impl NixWorker {
             "execute_derivation completed"
         );
 
-        // Fold the runner's own timing record into the stats (best-effort) and
-        // keep this action's split for the per-action log below.
+        // Fold the runner's own timing record into the stats (best-effort),
+        // classify the action as cached vs executed, and keep this action's
+        // split for the per-action log below.
         let runner = self
-            .record_runner_timing(Path::new(&out_path), build_call_wall)
+            .record_runner_timing(Path::new(&out_path), build_call_wall, exec_elapsed)
             .await;
 
         // Cost center: collect_outputs
@@ -497,6 +518,7 @@ impl NixWorker {
             let overhead = total_elapsed.saturating_sub(exec_elapsed);
             event!(
                 Level::DEBUG,
+                cached = runner.cached,
                 total_ms = total_elapsed.as_millis(),
                 exec_ms = exec_elapsed.as_millis(),
                 overhead_ms = overhead.as_millis(),
@@ -702,56 +724,86 @@ impl NixWorker {
         })
     }
 
-    /// Read `$out/timing.json` (written by the runner), fold its measurements
-    /// into the shared cumulative stats, and return this action's split so the
-    /// caller can log it: runner setup / task / wrap-up, plus the nix→runner
-    /// latency derived from the absolute runner start timestamp versus
-    /// `build_call_wall` (when the server asked the daemon to build).
+    /// Read `$out/timing.json` (written by the runner), classify the action as
+    /// cached or executed, fold the appropriate measurements into the shared
+    /// stats, and return this action's split for the per-action log.
     ///
-    /// Best-effort: a missing or malformed file yields an all-zero
-    /// [`RunnerTiming`] so builds with an older runner (no `timing.json`) keep
-    /// working.
+    /// `exec_elapsed` is the server's own wall-clock for the `build_derivation`
+    /// call, used as the "actual" time a cache hit took.
+    ///
+    /// **Cache detection:** a cache hit means the runner did not run for *this*
+    /// build, so either there is no `timing.json`, or the one present is stale
+    /// — its `runner_wall_start_ns` predates the moment we requested the build.
+    /// Executed actions have a fresh record whose start is at/after the request.
+    ///
+    /// For executed actions we fold the runner setup / task / wrap-up and the
+    /// nix→runner latency into the execution-breakdown cost centers.  For cache
+    /// hits we instead accumulate the cache accounting: the actual (tiny) time
+    /// it took versus the cost it avoided (the cached record's reported runtime
+    /// plus a conservative sandbox-setup floor).
+    ///
+    /// Best-effort: a missing or malformed file is treated as a cache hit with
+    /// zero avoided cost, so builds keep working regardless.
     async fn record_runner_timing(
         &self,
         out_dir: &Path,
         build_call_wall: SystemTime,
+        exec_elapsed: Duration,
     ) -> RunnerTiming {
-        let Ok(contents) = tokio::fs::read_to_string(out_dir.join("timing.json")).await else {
-            return RunnerTiming::default();
+        let build_call_ns = build_call_wall
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let parsed = tokio::fs::read_to_string(out_dir.join("timing.json"))
+            .await
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+
+        let split = match parsed {
+            None => {
+                // No (readable) timing record → treat as a cache hit.
+                RunnerTiming {
+                    cached: true,
+                    ..Default::default()
+                }
+            }
+            Some(timing) => {
+                let ns = |key: &str| timing.get(key).and_then(serde_json::Value::as_u64);
+                let runner_wall_start = ns("runner_wall_start_ns").unwrap_or(0);
+                // Fresh record ⇒ executed; stale (older than our request) or
+                // missing start ⇒ the runner did not run for this build.
+                let cached = runner_wall_start < build_call_ns;
+
+                RunnerTiming {
+                    cached,
+                    daemon_to_runner: Duration::from_nanos(
+                        runner_wall_start.saturating_sub(build_call_ns),
+                    ),
+                    setup: Duration::from_nanos(ns("setup_ns").unwrap_or(0)),
+                    task: Duration::from_nanos(ns("task_ns").unwrap_or(0)),
+                    wrapup: Duration::from_nanos(ns("wrapup_ns").unwrap_or(0)),
+                }
+            }
         };
-        let Ok(timing) = serde_json::from_str::<serde_json::Value>(&contents) else {
-            event!(Level::DEBUG, "Malformed timing.json, skipping runner timing");
-            return RunnerTiming::default();
-        };
 
-        let ns = |key: &str| timing.get(key).and_then(serde_json::Value::as_u64);
-
-        // nix→runner latency: absolute wall time the runner started, minus the
-        // moment we made the build request.  Clamp to zero — clock skew between
-        // the server and the sandbox, or a build served fully from cache, can
-        // make this slightly negative or meaningless.
-        let daemon_to_runner = ns("runner_wall_start_ns")
-            .map(|start_ns| {
-                let build_call_ns = build_call_wall
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
-                Duration::from_nanos(start_ns.saturating_sub(build_call_ns))
-            })
-            .unwrap_or_default();
-
-        let split = RunnerTiming {
-            daemon_to_runner,
-            setup: Duration::from_nanos(ns("setup_ns").unwrap_or(0)),
-            task: Duration::from_nanos(ns("task_ns").unwrap_or(0)),
-            wrapup: Duration::from_nanos(ns("wrapup_ns").unwrap_or(0)),
-        };
-
-        self.stats
-            .record(&self.stats.daemon_to_runner_us, split.daemon_to_runner);
-        self.stats.record(&self.stats.runner_setup_us, split.setup);
-        self.stats.record(&self.stats.runner_task_us, split.task);
-        self.stats.record(&self.stats.runner_wrapup_us, split.wrapup);
+        if split.cached {
+            // Cache hit: record what it cost (actual exec) vs what it saved
+            // (the cached record's runtime + the sandbox-setup we skipped).
+            self.stats.increment(&self.stats.actions_cached);
+            self.stats.record(&self.stats.cached_actual_us, exec_elapsed);
+            self.stats.record(
+                &self.stats.cached_would_have_us,
+                split.reported_total() + SANDBOX_SETUP_FLOOR,
+            );
+        } else {
+            // Executed: fold the runner-side breakdown into the execution stats.
+            self.stats
+                .record(&self.stats.daemon_to_runner_us, split.daemon_to_runner);
+            self.stats.record(&self.stats.runner_setup_us, split.setup);
+            self.stats.record(&self.stats.runner_task_us, split.task);
+            self.stats.record(&self.stats.runner_wrapup_us, split.wrapup);
+        }
 
         split
     }
