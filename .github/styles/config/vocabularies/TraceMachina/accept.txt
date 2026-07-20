@@ -48,6 +48,7 @@ Dedup
 deduplicated
 Delangue
 Deno
+dev
 Eagan
 ELB
 Eskandar

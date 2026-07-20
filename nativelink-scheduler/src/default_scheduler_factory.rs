@@ -224,9 +224,9 @@ pub fn nix_scheduler_factory(
         })?
         .socket_path()
         .to_string();
-    let nix_connection = NixDaemonConnectionPool::new_default(socket_path);
+    let nix_connection = NixDaemonConnectionPool::new_default(socket_path.clone());
     let runner_info = Arc::new(
-        RunnerInfo::from_env().err_tip(|| "Failed to initialise runner info from environment")?,
+        RunnerInfo::discover(&socket_path).err_tip(|| "Failed to initialise runner info")?,
     );
     let (action_scheduler, worker_scheduler) = NixScheduler::new(
         spec,

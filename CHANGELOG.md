@@ -5,6 +5,30 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.2.0] - 2026-07-20
+
+### Added
+
+- The server can now **build its own runner** via the recursive-nix daemon.
+  When `NIXCEPTION_RUNNER_OUT` / `NIXCEPTION_RUNNER_DRV` aren't set, it builds
+  the bundled `runner.nix` (embedded in the binary) with `nix build` against the
+  daemon, instead of refusing to start. A bare `nixception` binary is therefore
+  self-sufficient — the setup hook is no longer required just to supply the
+  runner.
+- `NIXCEPTION_NIXPKGS` environment variable: overrides the nixpkgs used to build
+  the runner (a path or reference importable as `import <ref> {}`). Defaults to a
+  pinned `nixos-unstable` tarball matching the flake's `nixpkgs` input, so the
+  self-built runner is cache-compatible with the hook-built one.
+
+### Changed
+
+- Runner discovery now prefers the environment variables when both are set
+  (unchanged behaviour for the setup hook and the `native-reccStdenv` dev shell)
+  and only self-builds when they aren't set. Setting exactly one of the pair is
+  now a clear configuration error.
+- The startup error messages no longer reference the nonexistent
+  `nixceptionWrapped` package.
+
 ## [0.1.1] - 2026-07-20
 
 ### Changed
