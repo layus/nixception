@@ -243,11 +243,11 @@ impl NixceptionStats {
         let overhead = total.saturating_sub(exec);
 
         if actions == 0 {
-            tracing::info!("Nixception shutting down — no actions were executed");
+            tracing::debug!("Nixception shutting down — no actions were executed");
             return;
         }
 
-        tracing::info!(
+        tracing::debug!(
             actions,
             succeeded,
             failed,

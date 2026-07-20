@@ -127,7 +127,7 @@ impl Push for PushServer {
     #[allow(clippy::blocks_in_conditions)]
     #[instrument(
         err(level = Level::WARN),
-        ret(level = Level::INFO),
+        ret(level = Level::DEBUG),
         skip_all,
         fields(request = ?grpc_request.get_ref())
     )]
@@ -150,7 +150,7 @@ impl Push for PushServer {
     #[allow(clippy::blocks_in_conditions)]
     #[instrument(
         err(level = Level::WARN),
-        ret(level = Level::INFO),
+        ret(level = Level::DEBUG),
         skip_all,
         fields(request = ?_grpc_request.get_ref())
     )]

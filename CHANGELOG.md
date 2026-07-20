@@ -28,13 +28,17 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   now a clear configuration error.
 - The startup error messages no longer reference the nonexistent
   `nixceptionWrapped` package.
-- Much quieter default logging. Per-action operational messages (derivation
-  upload, build completion, output collection, store-path resolution, per-client
-  connection, the periodic in-flight gauges, and the `NixStore` upload trace) are
-  now logged at `debug` instead of `info`. `info` is reserved for lifecycle
-  milestones (server ready, build-succeeded-after-retry, the shutdown timing
-  summary); set `RUST_LOG=debug` (or `NIXCEPTION_VERBOSE=1` with a `debug`
-  level) to restore the per-action detail.
+- Much quieter default logging. Per-action and per-request operational messages
+  are now logged at `debug` instead of `info`: the REAPI service handlers'
+  full-response tracing (`CAS`, `AC`, `ByteStream`, `Capabilities`, and the
+  others — via `#[instrument(ret)]`), derivation upload, build completion, output
+  collection, store-path resolution, per-client connection, the periodic and
+  peak in-flight gauges, the cumulative timing summary, and the `NixStore` upload
+  trace. `info` is now reserved for lifecycle milestones: server ready,
+  build-succeeded-after-retry, and orderly shutdown (SIGTERM handling, which was
+  previously logged at `warn`). Set `RUST_LOG=debug` to restore the per-action
+  detail. The human-readable timing summary is unaffected — the setup hook still
+  prints it from `NIXCEPTION_STATS_FILE`.
 
 ## [0.1.1] - 2026-07-20
 

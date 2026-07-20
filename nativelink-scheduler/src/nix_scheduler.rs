@@ -412,7 +412,7 @@ impl<
     async fn shutdown(&self, _shutdown_guard: ShutdownGuard) {
         let daemon_wait = self.nix_connection.cumulative_sem_wait_us();
         let g = self.nix_connection.gauges();
-        tracing::info!(
+        tracing::debug!(
             actions_peak = self.stats.actions_in_flight_peak(),
             uploads_peak = g.uploads_peak,
             builds_peak = g.builds_peak,

@@ -94,7 +94,7 @@ impl CapabilitiesServer {
 impl Capabilities for CapabilitiesServer {
     #[instrument(
         err,
-        ret(level = Level::INFO),
+        ret(level = Level::DEBUG),
         level = Level::ERROR,
         skip_all,
         fields(request = ?grpc_request.get_ref())

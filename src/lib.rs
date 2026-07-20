@@ -906,10 +906,10 @@ where
             .expect("Failed to listen to SIGTERM")
             .recv()
             .await;
-        warn!("Process terminated via SIGTERM");
+        info!("Process terminated via SIGTERM");
         drop(shutdown_tx_clone.send(shutdown_guard.clone()));
         let () = shutdown_guard.wait_for(Priority::P0).await;
-        warn!("{}", shutdown_msg);
+        info!("{}", shutdown_msg);
         std::process::exit(143);
     });
 
