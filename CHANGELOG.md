@@ -5,6 +5,14 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.1.1] - 2026-07-20
+
+### Changed
+
+- Release artifacts now contain only the `nixception` binary. The upstream
+  `nativelink` binary is still built by the flake but is no longer attached to
+  GitHub releases.
+
 ## [0.1.0] - 2026-07-20
 
 Initial release.

@@ -1,6 +1,8 @@
-# nixception 0.1.0
+# nixception 0.1.1
 
-The first release of **nixception**.
+nixception is a tool that turns REAPI build-tool actions into Nix builds. This
+patch release trims the published artifacts down to the `nixception` binary
+only; the upstream `nativelink` binary is no longer redistributed.
 
 ## What's nixception?
 

@@ -49,8 +49,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
+          # Only nixception is redistributed; the upstream nativelink binary
+          # is built as part of the flake but not published.
           cp result/bin/nixception "dist/nixception-${version}-x86_64-linux-musl"
-          cp result/bin/nativelink "dist/nativelink-${version}-x86_64-linux-musl"
           (cd dist && sha256sum ./* > "SHA256SUMS")
 
       - name: Create GitHub release
