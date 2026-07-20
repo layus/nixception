@@ -1,9 +1,6 @@
 [workspace]
-exclude = [
-  "tools/generate-bazel-rc",
-  "vendor",
-]
-resolver = "2"
+exclude = ["tools/generate-bazel-rc", "vendor"]
+resolver = "3"
 
 [package]
 edition = "2024"
