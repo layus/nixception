@@ -92,6 +92,10 @@
           src = (craneLibFor pkgs).path ./.;
           filter = path: type:
             (builtins.match "^.*(examples/.+\.json5|data/.+|nativelink-config/README\.md)" path != null)
+            # The nixception scheduler embeds the runner sources via
+            # include_str!("../../tools/runner.{nix,cpp}"), so they must survive
+            # the cargo-source filter.
+            || (builtins.match "^.*tools/runner\.(nix|cpp)$" path != null)
             || ((craneLibFor pkgs).filterCargoSources path type);
         };
 
