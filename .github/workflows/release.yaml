@@ -57,7 +57,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_args=()
+          if [ -f RELEASE_NOTES.md ]; then
+            # Use the curated release notes as the release body, and append
+            # the auto-generated commit/PR list underneath.
+            notes_args=(--notes-file RELEASE_NOTES.md --generate-notes)
+          else
+            notes_args=(--generate-notes)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --title "nixception $GITHUB_REF_NAME" \
-            --generate-notes \
+            "${notes_args[@]}" \
             dist/*
