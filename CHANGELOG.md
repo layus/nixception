@@ -28,6 +28,13 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   now a clear configuration error.
 - The startup error messages no longer reference the nonexistent
   `nixceptionWrapped` package.
+- Much quieter default logging. Per-action operational messages (derivation
+  upload, build completion, output collection, store-path resolution, per-client
+  connection, the periodic in-flight gauges, and the `NixStore` upload trace) are
+  now logged at `debug` instead of `info`. `info` is reserved for lifecycle
+  milestones (server ready, build-succeeded-after-retry, the shutdown timing
+  summary); set `RUST_LOG=debug` (or `NIXCEPTION_VERBOSE=1` with a `debug`
+  level) to restore the per-action detail.
 
 ## [0.1.1] - 2026-07-20
 

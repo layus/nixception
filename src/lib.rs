@@ -73,7 +73,7 @@ use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig as TlsServerConfig};
 use tonic::codec::CompressionEncoding;
 use tonic::service::Routes;
-use tracing::{error, error_span, info, trace_span, warn};
+use tracing::{debug, error, error_span, info, trace_span, warn};
 
 /// Note: This must be kept in sync with the documentation in `AdminConfig::path`.
 const DEFAULT_ADMIN_API_PATH: &str = "/admin";
@@ -780,7 +780,7 @@ pub fn tcp_accept_loop(
                 accept_result = tcp_listener.accept() => {
                     match accept_result {
                         Ok((tcp_stream, remote_addr)) => {
-                            info!(
+                            debug!(
                                 target: "nativelink::services",
                                 ?remote_addr,
                                 ?socket_addr,

@@ -221,7 +221,7 @@ impl<
                 loop {
                     interval.tick().await;
                     let g = pool.gauges();
-                    tracing::info!(
+                    tracing::debug!(
                         actions = stats.actions_in_flight(),
                         actions_peak = stats.actions_in_flight_peak(),
                         uploads = g.uploads,

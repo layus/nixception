@@ -430,7 +430,7 @@ impl NixWorker {
 
         // The derivation has been uploaded — transition Queued → Executing.
         event!(
-            Level::INFO,
+            Level::DEBUG,
             drv_path = ?drv_path.to_absolute_path(),
             out_path = ?out_path,
             "Derivation uploaded, marking action as Executing"
@@ -469,7 +469,7 @@ impl NixWorker {
 
             let overhead = total_elapsed.saturating_sub(exec_elapsed);
             event!(
-                Level::INFO,
+                Level::DEBUG,
                 total_ms = total_elapsed.as_millis(),
                 exec_ms = exec_elapsed.as_millis(),
                 overhead_ms = overhead.as_millis(),
@@ -556,7 +556,7 @@ impl NixWorker {
                         );
                     } else {
                         event!(
-                            Level::INFO,
+                            Level::DEBUG,
                             drv_path = ?drv_abs_path,
                             "Build completed successfully"
                         );
@@ -655,7 +655,7 @@ impl NixWorker {
             .record(&self.stats.output_upload_us, upload_start.elapsed());
 
         event!(
-            Level::INFO,
+            Level::DEBUG,
             num_output_files = output_files.len(),
             exit_code,
             "Output files collected"
@@ -901,7 +901,7 @@ impl NixWorker {
             }
 
             event!(
-                Level::INFO,
+                Level::DEBUG,
                 store_path = %abs_path,
                 deriver = %drv_abs_path,
                 output_name = %output_name,
@@ -1025,7 +1025,7 @@ impl NixWorker {
 
         if !resolved_drvs.is_empty() || !extra_sources.is_empty() {
             event!(
-                Level::INFO,
+                Level::DEBUG,
                 num_input_drvs = resolved_drvs.len(),
                 num_extra_sources = extra_sources.len(),
                 "Discovered Nix store path dependencies in action"

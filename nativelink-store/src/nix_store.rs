@@ -180,7 +180,7 @@ impl StoreDriver for NixStore {
         let exists_on_disk_before = Path::new(&expected_store_path).exists();
 
         event!(
-            Level::INFO,
+            Level::DEBUG,
             store_path = %expected_store_path,
             ca = %nix_ca,
             size = total_size,
