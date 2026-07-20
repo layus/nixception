@@ -5,6 +5,16 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.2.1] - 2026-07-20
+
+### Fixed
+
+- The clean `nix build` (and therefore the release build) failed to compile
+  after 0.2.0 because the flake's source filter dropped `tools/runner.nix` and
+  `tools/runner.cpp`, which the scheduler embeds via `include_str!`. They're now
+  kept in the build source. (0.2.0 produced no release artifacts as a result;
+  0.2.1 is the first buildable release of this line.)
+
 ## [0.2.0] - 2026-07-20
 
 ### Added

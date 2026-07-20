@@ -1,4 +1,4 @@
-# nixception 0.2.0
+# nixception 0.2.1
 
 nixception is a tool that turns REAPI build-tool actions into Nix builds. This
 release makes a bare `nixception` binary self-sufficient — it now **builds its
@@ -6,7 +6,11 @@ own runner** through the recursive-nix daemon when the runner environment
 variables aren't set, so it no longer refuses to start outside the setup hook.
 Default logging is also much quieter (per-action and per-request chatter moved
 to `debug`), and the server's log level is now configured with `NIXCEPTION_LOG`
-instead of `RUST_LOG`. See the [changelog](./CHANGELOG.md) for the full list.
+instead of `RUST_LOG`.
+
+0.2.1 fixes a build regression that prevented 0.2.0 from producing release
+artifacts (the embedded runner sources were dropped by the flake source filter).
+See the [changelog](./CHANGELOG.md) for the full list.
 
 ## What's nixception?
 
