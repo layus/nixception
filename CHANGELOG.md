@@ -32,6 +32,13 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   The summary reports the cache hit ratio, the **estimated time the cache
   saved** (the cached record's runtime plus a conservative 300 ms sandbox-setup
   floor, minus what the hit actually cost), and the resulting **cache speedup**.
+- The timing summary is now split into three sections: **Preparation** (common
+  to all actions — scanning, derivation prep, upload, output collection, and the
+  sub-steps), **Execution** (executed actions only — the command-execution span
+  and its runner phase breakdown, averaged over executed actions), and
+  **Cached** (cache hits — average actual vs avoided cost and the speedup). This
+  keeps cache hits from diluting the real-work averages; a fully-cached run
+  shows an empty execution section.
 
 ## [0.2.1] - 2026-07-20
 

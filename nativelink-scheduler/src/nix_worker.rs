@@ -483,7 +483,6 @@ impl NixWorker {
         let exec_start = Instant::now();
         self.execute_derivation(&drv_path).await?;
         let exec_elapsed = exec_start.elapsed();
-        self.stats.record(&self.stats.execute_us, exec_elapsed);
         event!(
             Level::DEBUG,
             elapsed_ms = exec_elapsed.as_millis(),
@@ -496,6 +495,13 @@ impl NixWorker {
         let runner = self
             .record_runner_timing(Path::new(&out_path), build_call_wall, exec_elapsed)
             .await;
+
+        // `execute_us` is an "executed actions only" cost center: a cache hit's
+        // exec span is tiny but non-zero and would dilute the executed average
+        // (its cost is accounted separately in the cache section instead).
+        if !runner.cached {
+            self.stats.record(&self.stats.execute_us, exec_elapsed);
+        }
 
         // Cost center: collect_outputs
         {

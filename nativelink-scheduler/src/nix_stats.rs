@@ -340,8 +340,12 @@ impl NixceptionStats {
             0.0
         };
 
+        let cached = self.actions_cached.load(Ordering::Relaxed);
+        let executed = actions.saturating_sub(cached);
         tracing::debug!(
             actions,
+            executed,
+            cached,
             succeeded,
             failed,
             wall_s = format_args!("{:.3}", wall.as_secs_f64()),
@@ -349,7 +353,6 @@ impl NixceptionStats {
             parallelism = format_args!("{parallelism:.2}"),
             actions_per_s = format_args!("{throughput:.2}"),
             peak_parallelism = self.actions_in_flight_peak.load(Ordering::Relaxed),
-            cached = self.actions_cached.load(Ordering::Relaxed),
             cache_saved_s = format_args!(
                 "{:.3}",
                 Duration::from_micros(
@@ -365,7 +368,14 @@ impl NixceptionStats {
             exec_s = format_args!("{:.3}", exec.as_secs_f64()),
             collect_s = format_args!("{:.3}", collect.as_secs_f64()),
             overhead_s = format_args!("{:.3}", overhead.as_secs_f64()),
-            avg_exec_ms = format_args!("{:.1}", exec.as_secs_f64() * 1000.0 / actions as f64),
+            avg_exec_ms = format_args!(
+                "{:.1}",
+                if executed == 0 {
+                    0.0
+                } else {
+                    exec.as_secs_f64() * 1000.0 / executed as f64
+                }
+            ),
             "Nixception cumulative timing statistics"
         );
     }
@@ -471,7 +481,17 @@ impl NixceptionStats {
             0.0
         };
 
+        // Per-action averages.  Preparation is common to every action, so it
+        // averages over `actions`; execution work only happens for executed
+        // (non-cached) actions, so it averages over `executed`.
         let avg = |d: Duration| -> f64 { d.as_secs_f64() * 1000.0 / actions as f64 };
+        let avg_exec = |d: Duration| -> f64 {
+            if executed == 0 {
+                0.0
+            } else {
+                d.as_secs_f64() * 1000.0 / executed as f64
+            }
+        };
         let fmt_dur = |d: Duration| -> String {
             if d.as_secs() >= 60 {
                 format!("{}m {:05.2}s", d.as_secs() / 60, d.as_secs_f64() % 60.0)
@@ -486,85 +506,206 @@ impl NixceptionStats {
             s,
             "  Nixception Timing Summary ({actions} actions: {succeeded} ok, {failed} failed)"
         );
+
+        // ── Preparation (common to all actions) ──────────────────────────
+        // Both executed and cached actions scan inputs, construct + upload the
+        // derivation, and collect the result, so these are averaged over all
+        // actions.
         let _ = writeln!(s, "  {}", "─".repeat(60));
+        let _ = writeln!(s, "  Preparation (all {actions} actions):");
         let _ = writeln!(
             s,
-            "  {:.<30} {} ({:>7.1} ms avg)",
+            "    {:.<28} {} ({:>7.1} ms avg)",
             "Store-path scanning",
             fmt_dur(scan),
             avg(scan)
         );
         let _ = writeln!(
             s,
-            "  {:.<30} {} ({:>7.1} ms avg)",
+            "    {:.<28} {} ({:>7.1} ms avg)",
             "Derivation preparation",
             fmt_dur(prep),
             avg(prep)
         );
         let _ = writeln!(
             s,
-            "  {:.<30} {} ({:>7.1} ms avg)",
+            "    {:.<28} {} ({:>7.1} ms avg)",
             "Upload to nix store",
             fmt_dur(upload),
             avg(upload)
         );
         let _ = writeln!(
             s,
-            "  {:.<30} {} ({:>7.1} ms avg)",
-            "Command execution",
-            fmt_dur(exec),
-            avg(exec)
-        );
-        // Break the opaque execution span into nix→runner latency and the
-        // runner's own setup / task / wrap-up phases, when the runner reported
-        // timing.  These four (+ unaccounted) sum to "Command execution".
-        if have_runner_timing {
-            let _ = writeln!(
-                s,
-                "      {:.<26} {} ({:>7.1} ms avg)",
-                "nix→runner latency",
-                fmt_dur(nix_latency),
-                avg(nix_latency)
-            );
-            let _ = writeln!(
-                s,
-                "      {:.<26} {} ({:>7.1} ms avg)",
-                "runner setup",
-                fmt_dur(runner_setup),
-                avg(runner_setup)
-            );
-            let _ = writeln!(
-                s,
-                "      {:.<26} {} ({:>7.1} ms avg)",
-                "task",
-                fmt_dur(runner_task),
-                avg(runner_task)
-            );
-            let _ = writeln!(
-                s,
-                "      {:.<26} {} ({:>7.1} ms avg)",
-                "runner wrap-up",
-                fmt_dur(runner_wrapup),
-                avg(runner_wrapup)
-            );
-            let _ = writeln!(
-                s,
-                "      {:.<26} {} ({:>7.1} ms avg)",
-                "unaccounted",
-                fmt_dur(exec_unaccounted),
-                avg(exec_unaccounted)
-            );
-        }
-        let _ = writeln!(
-            s,
-            "  {:.<30} {} ({:>7.1} ms avg)",
+            "    {:.<28} {} ({:>7.1} ms avg)",
             "Output collection",
             fmt_dur(collect),
             avg(collect)
         );
+
+        // Preparation sub-steps.
+        let _ = writeln!(s, "    Sub-steps:");
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "CAS proto fetch",
+            fmt_dur(cas_proto),
+            avg(cas_proto)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "Input tree unfold",
+            fmt_dur(unfold),
+            avg(unfold)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "Scan CAS reads",
+            fmt_dur(scan_cas),
+            avg(scan_cas)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} hits, {} misses",
+            "Scan cache", cache_hits, cache_misses,
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg, {} calls)",
+            "query_path_info",
+            fmt_dur(qpi),
+            avg(qpi),
+            qpi_count,
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} hits, {} misses",
+            "Path-info cache", pi_cache_hits, pi_cache_misses,
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "Manifest + hash",
+            fmt_dur(manifest_hash),
+            avg(manifest_hash)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "Output read+stdout/stderr",
+            fmt_dur(out_read),
+            avg(out_read)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {} ({:>7.1} ms avg)",
+            "Output CAS upload",
+            fmt_dur(out_upload),
+            avg(out_upload)
+        );
+        let _ = writeln!(
+            s,
+            "      {:.<26} {}",
+            "Daemon semaphore wait",
+            fmt_dur(daemon_wait),
+        );
+
+        // ── Execution (executed actions only) ────────────────────────────
         let _ = writeln!(s, "  {}", "─".repeat(60));
-        // Cumulative action time is the SUM of the per-action spans above; its
-        // sub-lines describe how that per-action work splits.
+        if executed == 0 {
+            let _ = writeln!(s, "  Execution: none (all actions were cached)");
+        } else {
+            let _ = writeln!(s, "  Execution ({executed} executed actions):");
+            let _ = writeln!(
+                s,
+                "    {:.<28} {} ({:>7.1} ms avg)",
+                "Command execution",
+                fmt_dur(exec),
+                avg_exec(exec)
+            );
+            // Break the opaque execution span into nix→runner latency and the
+            // runner's own setup / task / wrap-up phases.  These four (+
+            // unaccounted) sum to "Command execution".
+            if have_runner_timing {
+                let _ = writeln!(
+                    s,
+                    "      {:.<26} {} ({:>7.1} ms avg)",
+                    "nix→runner latency",
+                    fmt_dur(nix_latency),
+                    avg_exec(nix_latency)
+                );
+                let _ = writeln!(
+                    s,
+                    "      {:.<26} {} ({:>7.1} ms avg)",
+                    "runner setup",
+                    fmt_dur(runner_setup),
+                    avg_exec(runner_setup)
+                );
+                let _ = writeln!(
+                    s,
+                    "      {:.<26} {} ({:>7.1} ms avg)",
+                    "task",
+                    fmt_dur(runner_task),
+                    avg_exec(runner_task)
+                );
+                let _ = writeln!(
+                    s,
+                    "      {:.<26} {} ({:>7.1} ms avg)",
+                    "runner wrap-up",
+                    fmt_dur(runner_wrapup),
+                    avg_exec(runner_wrapup)
+                );
+                let _ = writeln!(
+                    s,
+                    "      {:.<26} {} ({:>7.1} ms avg)",
+                    "unaccounted",
+                    fmt_dur(exec_unaccounted),
+                    avg_exec(exec_unaccounted)
+                );
+            }
+        }
+
+        // ── Cached (cache hits) ──────────────────────────────────────────
+        if cached > 0 {
+            let hit_pct = cached as f64 / actions as f64 * 100.0;
+            // Speedup = what the cache hits would have cost / what they did cost.
+            let speedup = if cached_actual.as_nanos() > 0 {
+                cached_would_have.as_secs_f64() / cached_actual.as_secs_f64()
+            } else {
+                0.0
+            };
+            let avg_cached = |d: Duration| -> f64 { d.as_secs_f64() * 1000.0 / cached as f64 };
+            let _ = writeln!(s, "  {}", "─".repeat(60));
+            let _ = writeln!(
+                s,
+                "  Cached ({cached} hits, {hit_pct:.1}% of all actions):"
+            );
+            let _ = writeln!(
+                s,
+                "    {:.<28} {} ({:>7.1} ms avg)",
+                "Actual cost",
+                fmt_dur(cached_actual),
+                avg_cached(cached_actual)
+            );
+            let _ = writeln!(
+                s,
+                "    {:.<28} {} ({:>7.1} ms avg)",
+                "Est. cost if executed",
+                fmt_dur(cached_would_have),
+                avg_cached(cached_would_have)
+            );
+            let _ = writeln!(
+                s,
+                "    {:.<28} {} ({:.1}x speedup)",
+                "Est. time saved",
+                fmt_dur(cache_saved),
+                speedup
+            );
+        }
+
+        // ── Global: wall-clock, parallelism, throughput ──────────────────
+        let _ = writeln!(s, "  {}", "─".repeat(60));
         let _ = writeln!(
             s,
             "  {:.<30} {} ({:>7.1} ms avg)",
@@ -584,121 +725,13 @@ impl NixceptionStats {
             fmt_dur(overhead),
             overhead_pct
         );
-        // True elapsed time and how much parallelism it reflects.
-        let _ = writeln!(s, "  {}", "─".repeat(60));
         let _ = writeln!(s, "  {:.<30} {}", "Wall-clock (elapsed)", fmt_dur(wall));
         let _ = writeln!(
             s,
             "  {:.<30} {:.2}x avg, {} peak",
             "Parallelism (cum / wall)", parallelism, peak_parallelism
         );
-        let _ = writeln!(
-            s,
-            "  {:.<30} {:.2} actions/s",
-            "Throughput", throughput
-        );
-
-        // Cache accounting: how many actions were served from the store and the
-        // (estimated) time that saved.  Only shown when some hit the cache.
-        if cached > 0 {
-            let hit_pct = cached as f64 / actions as f64 * 100.0;
-            // Speedup = what the cache hits would have cost / what they did cost.
-            let speedup = if cached_actual.as_nanos() > 0 {
-                cached_would_have.as_secs_f64() / cached_actual.as_secs_f64()
-            } else {
-                0.0
-            };
-            let _ = writeln!(s, "  {}", "─".repeat(60));
-            let _ = writeln!(
-                s,
-                "  {:.<30} {} hit / {} run ({:.1}% cached)",
-                "Cache", cached, executed, hit_pct
-            );
-            let _ = writeln!(
-                s,
-                "  {:.<30} {} (would have cost {}, took {})",
-                "Est. time saved by cache",
-                fmt_dur(cache_saved),
-                fmt_dur(cached_would_have),
-                fmt_dur(cached_actual)
-            );
-            let _ = writeln!(s, "  {:.<30} {:.1}x on cache hits", "Cache speedup", speedup);
-        }
-
-        // Sub-step breakdown
-        let _ = writeln!(s);
-        let _ = writeln!(s, "  Sub-step breakdown:");
-        let _ = writeln!(s, "  {}", "─".repeat(60));
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "CAS proto fetch",
-            fmt_dur(cas_proto),
-            avg(cas_proto)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "Input tree unfold",
-            fmt_dur(unfold),
-            avg(unfold)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "Scan CAS reads",
-            fmt_dur(scan_cas),
-            avg(scan_cas)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} hits, {} misses",
-            "Scan cache",
-            cache_hits,
-            cache_misses,
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg, {} calls)",
-            "query_path_info",
-            fmt_dur(qpi),
-            avg(qpi),
-            qpi_count,
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} hits, {} misses",
-            "Path-info cache",
-            pi_cache_hits,
-            pi_cache_misses,
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "Manifest + hash",
-            fmt_dur(manifest_hash),
-            avg(manifest_hash)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "Output read+stdout/stderr",
-            fmt_dur(out_read),
-            avg(out_read)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {} ({:>7.1} ms avg)",
-            "Output CAS upload",
-            fmt_dur(out_upload),
-            avg(out_upload)
-        );
-        let _ = writeln!(
-            s,
-            "    {:.<28} {}",
-            "Daemon semaphore wait",
-            fmt_dur(daemon_wait),
-        );
+        let _ = writeln!(s, "  {:.<30} {:.2} actions/s", "Throughput", throughput);
 
         // Retry stats
         let retries_attempted = self.retries_attempted.load(Ordering::Relaxed);
@@ -708,24 +741,9 @@ impl NixceptionStats {
             let _ = writeln!(s);
             let _ = writeln!(s, "  Retry statistics:");
             let _ = writeln!(s, "  {}", "─".repeat(60));
-            let _ = writeln!(
-                s,
-                "    {:.<28} {}",
-                "Retries attempted",
-                retries_attempted,
-            );
-            let _ = writeln!(
-                s,
-                "    {:.<28} {}",
-                "Retries succeeded",
-                retries_succeeded,
-            );
-            let _ = writeln!(
-                s,
-                "    {:.<28} {}",
-                "Retries exhausted",
-                retries_exhausted,
-            );
+            let _ = writeln!(s, "    {:.<28} {}", "Retries attempted", retries_attempted,);
+            let _ = writeln!(s, "    {:.<28} {}", "Retries succeeded", retries_succeeded,);
+            let _ = writeln!(s, "    {:.<28} {}", "Retries exhausted", retries_exhausted,);
         }
         let _ = writeln!(s);
 
@@ -903,15 +921,42 @@ mod tests {
         let summary = stats
             .format_summary_with_daemon_wait(0)
             .expect("summary with actions");
-        assert!(summary.contains("Cache"), "missing cache section:\n{summary}");
+        // The three sections are present with the right denominators.
         assert!(
-            summary.contains("2 hit / 1 run"),
-            "wrong hit/run counts:\n{summary}"
+            summary.contains("Preparation (all 3 actions)"),
+            "missing/mislabeled preparation section:\n{summary}"
+        );
+        assert!(
+            summary.contains("Execution (1 executed actions)"),
+            "missing/mislabeled execution section:\n{summary}"
+        );
+        assert!(
+            summary.contains("Cached (2 hits"),
+            "missing/mislabeled cached section:\n{summary}"
         );
         // Speedup = would_have (2s) / actual (20ms) = 100x.
         assert!(
-            summary.contains("100.0x"),
+            summary.contains("100.0x speedup"),
             "wrong speedup:\n{summary}"
+        );
+    }
+
+    #[test]
+    fn summary_execution_section_empty_when_all_cached() {
+        let stats = NixceptionStats::default();
+        stats.increment(&stats.actions_total);
+        stats.increment(&stats.actions_succeeded);
+        stats.record(&stats.total_action_us, Duration::from_millis(5));
+        stats.increment(&stats.actions_cached);
+        stats.record(&stats.cached_actual_us, Duration::from_millis(1));
+        stats.record(&stats.cached_would_have_us, Duration::from_millis(400));
+
+        let summary = stats
+            .format_summary_with_daemon_wait(0)
+            .expect("summary with actions");
+        assert!(
+            summary.contains("Execution: none (all actions were cached)"),
+            "expected empty execution section:\n{summary}"
         );
     }
 
