@@ -69,6 +69,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -374,11 +375,17 @@ static CStringArray build_child_argv(const json &manifest) {
 /// Returns the child's exit code.  Dies on infrastructure failures
 /// (fork, waitpid, file creation).
 static int execute_command(const CStringArray &cmd, const CStringArray &env,
-                           const fs::path &out_dir) {
+                           const fs::path &out_dir,
+                           std::chrono::steady_clock::time_point &task_start,
+                           std::chrono::steady_clock::time_point &task_end) {
     const fs::path stdout_path = out_dir / "stdout";
     const fs::path stderr_path = out_dir / "stderr";
     const fs::path exitcode_path = out_dir / "exitcode";
 
+    // The "task" is the child command itself: from just before fork() to the
+    // moment waitpid() reports it finished.  Writing the exit code and touching
+    // the stdout/stderr files afterwards is wrap-up, not task time.
+    task_start = std::chrono::steady_clock::now();
     pid_t pid = ::fork();
     if (pid < 0) {
         die(std::string("fork: ") + std::strerror(errno));
@@ -427,6 +434,7 @@ static int execute_command(const CStringArray &cmd, const CStringArray &env,
             die(std::string("waitpid: ") + std::strerror(errno));
         }
     }
+    task_end = std::chrono::steady_clock::now();
 
     int exit_code;
     if (WIFEXITED(status)) {
@@ -579,7 +587,48 @@ static void collect_command_outputs(const json &manifest,
 
 // ── main ────────────────────────────────────────────────────────────────────
 
+/// Write a machine-readable timing record to `$out/timing.json`, alongside the
+/// existing `exitcode` / `stdout` / `stderr` files.  nixception's
+/// `collect_action_result()` reads this back to break its opaque "command
+/// execution" span into nix→runner latency + runner setup / task / wrap-up.
+///
+/// All durations are in nanoseconds.  `runner_wall_start_ns` is an absolute
+/// wall-clock timestamp (Unix epoch, `system_clock`); the server compares it to
+/// the moment it asked the daemon to build, to derive the nix→runner latency.
+/// Best-effort: any failure is ignored (timing is diagnostic, not essential).
+static void write_timing(const fs::path &out_dir, long long runner_wall_start_ns,
+                         long long setup_ns, long long task_ns,
+                         long long wrapup_ns) {
+    json timing = {
+        {"schema", 1},
+        {"runner_wall_start_ns", runner_wall_start_ns},
+        {"setup_ns", setup_ns},
+        {"task_ns", task_ns},
+        {"wrapup_ns", wrapup_ns},
+    };
+    std::error_code ec;
+    std::ofstream ofs(out_dir / "timing.json");
+    if (ofs) {
+        ofs << timing.dump();
+    }
+}
+
 int main() {
+    using clock = std::chrono::steady_clock;
+    const auto ns = [](clock::duration d) {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
+    };
+
+    // Absolute wall-clock start (Unix epoch) so the server can measure the gap
+    // between its build request to the daemon and the runner actually starting.
+    const long long runner_wall_start_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    const auto t_start = clock::now();
+
+    // ── SETUP ────────────────────────────────────────────────────────────
     // 1. Read manifest and $out.
     json manifest = read_manifest();
     fs::path out_dir = get_out_dir();
@@ -599,16 +648,30 @@ int main() {
     CStringArray env = build_child_env(manifest);
     CStringArray cmd = build_child_argv(manifest);
 
+    // ── TASK ─────────────────────────────────────────────────────────────
     // 5. Fork, exec, wait.  The child's exit code is written to
     //    $out/exitcode; the runner itself only fails on infrastructure
-    //    errors, not on command failure.
-    execute_command(cmd, env, out_dir);
+    //    errors, not on command failure.  execute_command records the exact
+    //    fork→waitpid span into task_start/task_end.
+    clock::time_point task_start{}, task_end{};
+    execute_command(cmd, env, out_dir, task_start, task_end);
     //print_tree(".");
 
+    // ── WRAP-UP ──────────────────────────────────────────────────────────
     // 6. Collect declared command outputs into $out/outputs/.
     //    Missing outputs are silently skipped.
     collect_command_outputs(manifest, out_dir, working_directory);
     //print_tree(out_dir);
+    const auto t_end = clock::now();
+
+    // "setup" spans everything before the child ran; "task" is the child's own
+    // execution; "wrap-up" is output collection after it finished.  The tiny
+    // gaps (t_setup_done→task_start, task_end→collect start) are attributed to
+    // setup and wrap-up respectively so the three sum to the runner's runtime.
+    write_timing(out_dir, runner_wall_start_ns,
+                 /*setup_ns=*/ns(task_start - t_start),
+                 /*task_ns=*/ns(task_end - task_start),
+                 /*wrapup_ns=*/ns(t_end - task_end));
 
     // The runner itself always exits 0.  The action's real exit code is
     // recorded in $out/exitcode and interpreted by nixception's

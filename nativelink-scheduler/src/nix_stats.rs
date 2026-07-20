@@ -82,9 +82,37 @@ pub struct NixceptionStats {
     pub derivation_prep_us: AtomicU64,
 
     /// Time spent executing the derivation via the Nix daemon
-    /// (`build_derivation`).
+    /// (`build_derivation`).  This coarse span is broken down by the four
+    /// runner-timing fields below.
     #[metric(help = "Cumulative time executing derivations (us)")]
     pub execute_us: AtomicU64,
+
+    // ── Execution breakdown (from the runner's $out/timing.json) ─────
+    //
+    // These four split the opaque `execute_us` span.  They come from the
+    // runner itself (via `$out/timing.json`), so they are only populated when
+    // the built runner emits timing (best-effort; older runners contribute 0).
+
+    /// Latency from the `build_derivation` request to the runner starting
+    /// inside the sandbox — i.e. time spent in nix / the daemon (scheduling,
+    /// sandbox setup) before any runner code runs.
+    #[metric(help = "Cumulative nix→runner start latency (us)")]
+    pub daemon_to_runner_us: AtomicU64,
+
+    /// Runner setup phase: reading the manifest, copying inputs from the
+    /// store, preparing directories and the child environment.
+    #[metric(help = "Cumulative runner setup time (us)")]
+    pub runner_setup_us: AtomicU64,
+
+    /// The task itself: the action's command running in the sandbox
+    /// (the runner's fork→waitpid span).
+    #[metric(help = "Cumulative runner task time (us)")]
+    pub runner_task_us: AtomicU64,
+
+    /// Runner wrap-up phase: collecting declared outputs after the command
+    /// finished.
+    #[metric(help = "Cumulative runner wrap-up time (us)")]
+    pub runner_wrapup_us: AtomicU64,
 
     /// Time spent collecting outputs: reading the exit code, uploading
     /// stdout/stderr, walking and uploading output files to the CAS.
@@ -298,6 +326,22 @@ impl NixceptionStats {
         let collect = Duration::from_micros(self.collect_outputs_us.load(Ordering::Relaxed));
         let overhead = total.saturating_sub(exec);
 
+        // Execution breakdown (from the runner's timing.json).
+        let nix_latency = Duration::from_micros(self.daemon_to_runner_us.load(Ordering::Relaxed));
+        let runner_setup = Duration::from_micros(self.runner_setup_us.load(Ordering::Relaxed));
+        let runner_task = Duration::from_micros(self.runner_task_us.load(Ordering::Relaxed));
+        let runner_wrapup = Duration::from_micros(self.runner_wrapup_us.load(Ordering::Relaxed));
+        // Whatever the runner timing does not account for (server-side daemon
+        // round-trip after the runner exits, unmeasured gaps, or actions whose
+        // runner produced no timing record).
+        let exec_unaccounted = exec
+            .saturating_sub(nix_latency)
+            .saturating_sub(runner_setup)
+            .saturating_sub(runner_task)
+            .saturating_sub(runner_wrapup);
+        let have_runner_timing =
+            !(nix_latency.is_zero() && runner_setup.is_zero() && runner_task.is_zero());
+
         // Sub-step durations
         let cas_proto = Duration::from_micros(self.cas_proto_fetch_us.load(Ordering::Relaxed));
         let unfold = Duration::from_micros(self.unfold_us.load(Ordering::Relaxed));
@@ -365,6 +409,46 @@ impl NixceptionStats {
             fmt_dur(exec),
             avg(exec)
         );
+        // Break the opaque execution span into nix→runner latency and the
+        // runner's own setup / task / wrap-up phases, when the runner reported
+        // timing.  These four (+ unaccounted) sum to "Command execution".
+        if have_runner_timing {
+            let _ = writeln!(
+                s,
+                "      {:.<26} {} ({:>7.1} ms avg)",
+                "nix→runner latency",
+                fmt_dur(nix_latency),
+                avg(nix_latency)
+            );
+            let _ = writeln!(
+                s,
+                "      {:.<26} {} ({:>7.1} ms avg)",
+                "runner setup",
+                fmt_dur(runner_setup),
+                avg(runner_setup)
+            );
+            let _ = writeln!(
+                s,
+                "      {:.<26} {} ({:>7.1} ms avg)",
+                "task",
+                fmt_dur(runner_task),
+                avg(runner_task)
+            );
+            let _ = writeln!(
+                s,
+                "      {:.<26} {} ({:>7.1} ms avg)",
+                "runner wrap-up",
+                fmt_dur(runner_wrapup),
+                avg(runner_wrapup)
+            );
+            let _ = writeln!(
+                s,
+                "      {:.<26} {} ({:>7.1} ms avg)",
+                "unaccounted",
+                fmt_dur(exec_unaccounted),
+                avg(exec_unaccounted)
+            );
+        }
         let _ = writeln!(
             s,
             "  {:.<30} {} ({:>7.1} ms avg)",

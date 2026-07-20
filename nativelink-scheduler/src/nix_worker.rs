@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Extension trait for [`Path`] that adds a `relative_to` method,
 /// mirroring the unstable `std::path::Path::relative_to`.
@@ -105,6 +105,21 @@ struct PathEntry {
     store_path: StorePath<String>,
     digest: DigestInfo,
     is_executable: bool,
+}
+
+/// A single action's runner-side timing split, read back from
+/// `$out/timing.json`.  All-zero when the runner produced no timing record.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunnerTiming {
+    /// Latency from the server's `build_derivation` request to the runner
+    /// actually starting inside the sandbox (time spent in nix/the daemon).
+    daemon_to_runner: Duration,
+    /// Runner setup: read manifest, copy inputs, prepare dirs/env.
+    setup: Duration,
+    /// The task itself: the exec'd command (fork→waitpid).
+    task: Duration,
+    /// Runner wrap-up: collect declared outputs.
+    wrapup: Duration,
 }
 
 /// Information about a store path's deriver, resolved via the Nix daemon.
@@ -441,6 +456,10 @@ impl NixWorker {
         .await;
 
         // Cost center: execute_derivation
+        // Capture an absolute wall-clock timestamp for the moment we ask the
+        // daemon to build, so we can measure the nix→runner latency (the gap
+        // until the runner actually starts inside the build sandbox).
+        let build_call_wall = SystemTime::now();
         let exec_start = Instant::now();
         self.execute_derivation(&drv_path).await?;
         let exec_elapsed = exec_start.elapsed();
@@ -451,10 +470,18 @@ impl NixWorker {
             "execute_derivation completed"
         );
 
+        // Fold the runner's own timing record into the stats (best-effort) and
+        // keep this action's split for the per-action log below.
+        let runner = self
+            .record_runner_timing(Path::new(&out_path), build_call_wall)
+            .await;
+
         // Cost center: collect_outputs
         {
             let _guard = TimingGuard::new(&self.stats, &self.stats.collect_outputs_us);
-            let action_result = self.collect_action_result(Path::new(&out_path), &working_directory).await?;
+            let action_result = self
+                .collect_action_result(Path::new(&out_path), &working_directory)
+                .await?;
 
             // Record totals before sending the final update.
             let total_elapsed = action_start.elapsed();
@@ -473,6 +500,10 @@ impl NixWorker {
                 total_ms = total_elapsed.as_millis(),
                 exec_ms = exec_elapsed.as_millis(),
                 overhead_ms = overhead.as_millis(),
+                nix_to_runner_ms = runner.daemon_to_runner.as_millis(),
+                runner_setup_ms = runner.setup.as_millis(),
+                task_ms = runner.task.as_millis(),
+                runner_wrapup_ms = runner.wrapup.as_millis(),
                 "Action timing breakdown"
             );
 
@@ -490,7 +521,7 @@ impl NixWorker {
     const MAX_BUILD_RETRIES: u32 = 3;
 
     /// Initial backoff delay between retries (doubles each attempt).
-    const INITIAL_RETRY_DELAY: time::Duration = time::Duration::from_secs(2);
+    const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
     /// Build the derivation by sending it to the nix daemon and waiting
     /// for completion.
@@ -519,7 +550,7 @@ impl NixWorker {
 
             // Run the build alongside a periodic keepalive so the state
             // manager doesn't time out long-running compilations.
-            let mut keepalive = time::interval(time::Duration::from_secs(30));
+            let mut keepalive = time::interval(Duration::from_secs(30));
             keepalive.tick().await; // consume the immediate first tick
 
             let outcome = tokio::select! {
@@ -669,6 +700,60 @@ impl NixWorker {
             message: out_dir.to_string_lossy().to_string(),
             ..Default::default()
         })
+    }
+
+    /// Read `$out/timing.json` (written by the runner), fold its measurements
+    /// into the shared cumulative stats, and return this action's split so the
+    /// caller can log it: runner setup / task / wrap-up, plus the nix→runner
+    /// latency derived from the absolute runner start timestamp versus
+    /// `build_call_wall` (when the server asked the daemon to build).
+    ///
+    /// Best-effort: a missing or malformed file yields an all-zero
+    /// [`RunnerTiming`] so builds with an older runner (no `timing.json`) keep
+    /// working.
+    async fn record_runner_timing(
+        &self,
+        out_dir: &Path,
+        build_call_wall: SystemTime,
+    ) -> RunnerTiming {
+        let Ok(contents) = tokio::fs::read_to_string(out_dir.join("timing.json")).await else {
+            return RunnerTiming::default();
+        };
+        let Ok(timing) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            event!(Level::DEBUG, "Malformed timing.json, skipping runner timing");
+            return RunnerTiming::default();
+        };
+
+        let ns = |key: &str| timing.get(key).and_then(serde_json::Value::as_u64);
+
+        // nix→runner latency: absolute wall time the runner started, minus the
+        // moment we made the build request.  Clamp to zero — clock skew between
+        // the server and the sandbox, or a build served fully from cache, can
+        // make this slightly negative or meaningless.
+        let daemon_to_runner = ns("runner_wall_start_ns")
+            .map(|start_ns| {
+                let build_call_ns = build_call_wall
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                Duration::from_nanos(start_ns.saturating_sub(build_call_ns))
+            })
+            .unwrap_or_default();
+
+        let split = RunnerTiming {
+            daemon_to_runner,
+            setup: Duration::from_nanos(ns("setup_ns").unwrap_or(0)),
+            task: Duration::from_nanos(ns("task_ns").unwrap_or(0)),
+            wrapup: Duration::from_nanos(ns("wrapup_ns").unwrap_or(0)),
+        };
+
+        self.stats
+            .record(&self.stats.daemon_to_runner_us, split.daemon_to_runner);
+        self.stats.record(&self.stats.runner_setup_us, split.setup);
+        self.stats.record(&self.stats.runner_task_us, split.task);
+        self.stats.record(&self.stats.runner_wrapup_us, split.wrapup);
+
+        split
     }
 
     // ----- derivation helpers -----

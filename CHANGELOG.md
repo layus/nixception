@@ -5,6 +5,21 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.3.0] - 2026-07-20
+
+### Changed
+
+- Reworked timing statistics to break down the previously opaque "command
+  execution" span. The runner now measures its own **setup**, **task**
+  (the command it runs), and **wrap-up** phases and writes them to
+  `$out/timing.json`; the server reads them back and also derives the
+  **nix→runner latency** — the time between requesting the build from the
+  daemon and the runner actually starting inside the sandbox. The timing
+  summary now nests these under "Command execution," and the per-action
+  "Action timing breakdown" debug log carries the same split. Reading the
+  runner's timing is best-effort, so builds whose runner predates this change
+  still work.
+
 ## [0.2.1] - 2026-07-20
 
 ### Fixed
