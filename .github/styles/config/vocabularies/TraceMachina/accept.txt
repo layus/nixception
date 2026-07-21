@@ -36,6 +36,7 @@ Bruer
 buildable
 bundler
 cacheable
+cgroup
 Chromium
 Citrix
 Cloudflare
@@ -107,6 +108,7 @@ remoteable
 Rosetta
 sandboxing
 shipstorm
+SIGKILLs
 SPDX
 Starlark
 stderr

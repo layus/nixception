@@ -253,11 +253,12 @@ nixceptionStartPhase() {
     # ── Start the background memory sampler ──────────────────────────────────
     # Streams a compact cgroup-memory line to stderr every couple of seconds so
     # the run-up to an OOM kill is visible in the build log even if the EXIT
-    # trap is itself killed by the OOM-group.  Enabled by default while we are
-    # debugging the intermittent SIGKILL; set NIXCEPTION_DEBUG_MEM=0 to disable
-    # or NIXCEPTION_DEBUG_MEM_INTERVAL=<seconds> to change the cadence.
+    # trap is itself killed by the OOM-group.  Off by default (it is noisy); set
+    # NIXCEPTION_DEBUG_MEM=1 to enable it when investigating an intermittent
+    # SIGKILL, and NIXCEPTION_DEBUG_MEM_INTERVAL=<seconds> to change the cadence.
+    # The on-failure OOM report below runs regardless.
     local _mem_pid=""
-    if [ "${NIXCEPTION_DEBUG_MEM:-1}" = "1" ]; then
+    if [ "${NIXCEPTION_DEBUG_MEM:-0}" = "1" ]; then
         _nixception_mem_sampler "$_pid" &
         _mem_pid=$!
         _nixception_log "memory sampler started (pid $_mem_pid)"

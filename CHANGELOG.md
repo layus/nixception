@@ -5,6 +5,15 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [Unreleased]
+
+### Changed
+
+- The background cgroup memory sampler (the recurring `nixception-hook: mem …`
+  lines) is now **off by default**. It was on by default while investigating the
+  intermittent OOM SIGKILLs; set `NIXCEPTION_DEBUG_MEM=1` to re-enable it. The
+  on-failure cgroup/OOM report still runs regardless.
+
 ## [0.3.0] - 2026-07-20
 
 ### Changed
