@@ -1,32 +1,28 @@
-# nixception 0.3.0
+# nixception 0.4.0
 
-This release focuses on **timing and cache observability** — making it clear
-where time actually goes and how much the Nix cache is saving.
+This release makes nixception usable **outside a build sandbox** and adds a real
+integration test suite around that.
 
 ## Highlights
 
-- **Runner-phase timing.** The runner now measures its own setup, task, and
-  wrap-up phases and reports them back, so the previously opaque
-  "command execution" span is broken down into the time spent in Nix (the
-  **nix→runner latency**: daemon scheduling and sandbox setup) versus the
-  runner's setup, the task itself, and wrap-up.
+- **Isolated store support.** `NIXCEPTION_STORE_ROOT` (or the `store_root`
+  config field) relocates the server's store reads to `<root>/nix/store/...`, so
+  nixception can run against an isolated Nix daemon whose physical store lives
+  outside the real `/nix/store`. Paths on the wire and in derivations stay
+  logical; it's off by default and inert when unset.
 
-- **Honest wall-clock, parallelism, and throughput.** The summary no longer
-  mislabels the *sum* of per-action spans as wall-clock. It now reports the real
-  elapsed wall-clock separately from cumulative action time, and adds average /
-  peak **parallelism** and **throughput** (actions per second).
+- **Standalone integration tests.** A new Rust suite spins up a throwaway chroot
+  store + isolated daemon, points a standalone nixception at it, drives `recc`
+  compiles, and asserts on the resulting store (a compile lands as a
+  `-reapi-action` path, distinct compiles differ, an identical re-compile is a
+  cache hit). This exercises the non-sandbox path and enables store-level
+  assertions the derivation-based checks can't. Run with `just test-standalone`.
 
-- **Cache accounting.** Actions served from the Nix cache are now distinguished
-  from executed ones. The summary reports the cache hit ratio, the estimated
-  time the cache saved, and the resulting speedup.
+- **Quieter builds by default.** The recurring `nixception-hook: mem …` cgroup
+  memory sampler is now off by default (set `NIXCEPTION_DEBUG_MEM=1` to
+  re-enable); the on-failure OOM report still runs.
 
-- **Three-section summary.** The timing report is reorganized into
-  **Preparation** (common to all actions), **Execution** (executed actions
-  only, so cache hits don't dilute the real-work averages), and **Cached**
-  (hits, with the benefit estimate).
-
-See the [changelog](./CHANGELOG.md) for the full list, including the earlier
-0.2.x fixes carried into this release.
+See the [changelog](./CHANGELOG.md) for the full list.
 
 ## Licensing
 

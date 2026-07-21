@@ -5,7 +5,7 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-21
 
 ### Added
 
