@@ -47,6 +47,11 @@ pub struct NixStore {
     #[metric(help = "The path of the daemon unix socket")]
     socket_path: String,
 
+    /// Physical root of a chroot store, if any.  When `Some(root)`, the store's
+    /// own filesystem reads resolve `/nix/store/X` to `<root>/nix/store/X`.
+    /// `None` reads the real `/nix/store` (the default).
+    store_root: Option<String>,
+
     /// Connection pool to the Nix daemon.  All daemon operations are
     /// routed through this object.
     connection: Arc<NixDaemonConnectionPool>,
@@ -60,12 +65,30 @@ impl NixStore {
             .or_else(|| Self::socket_path_from_env())
             .unwrap_or_else(|| "/nix/var/nix/daemon-socket/socket".to_string());
 
+        let store_root = spec
+            .store_root
+            .clone()
+            .or_else(|| std::env::var("NIXCEPTION_STORE_ROOT").ok())
+            .filter(|s| !s.is_empty());
+
         let connection = NixDaemonConnectionPool::new_default(socket_path.clone());
 
         Ok(Arc::new(Self {
             socket_path,
+            store_root,
             connection,
         }))
+    }
+
+    /// Map a logical store path (`/nix/store/X`, as used on the wire and in
+    /// derivations) to the physical filesystem path the server should read.
+    /// With a chroot store this prepends `store_root`; otherwise it is the
+    /// identity, so behavior is unchanged when no root is configured.
+    fn physical(&self, logical_abs_path: &str) -> String {
+        match &self.store_root {
+            Some(root) => format!("{}{}", root.trim_end_matches('/'), logical_abs_path),
+            None => logical_abs_path.to_string(),
+        }
     }
 
     /// Try to derive the daemon socket path from the `NIX_REMOTE`
@@ -142,7 +165,7 @@ impl StoreDriver for NixStore {
         for (key, result) in keys.iter().zip(results.iter_mut()) {
             *result = key_to_store_path(key).ok().and_then(|sp|
                 // XXX: Use is_valid_path instead
-                Path::new(&sp.to_absolute_path())
+                Path::new(&self.physical(&sp.to_absolute_path()))
                     .symlink_metadata()
                     .map(|m| m.len()).ok())
         }
@@ -177,7 +200,7 @@ impl StoreDriver for NixStore {
             .await
             .map(|info| info.is_some())
             .unwrap_or(false);
-        let exists_on_disk_before = Path::new(&expected_store_path).exists();
+        let exists_on_disk_before = Path::new(&self.physical(&expected_store_path)).exists();
 
         event!(
             Level::DEBUG,
@@ -231,7 +254,7 @@ impl StoreDriver for NixStore {
                     .await
                     .map(|info| info.is_some())
                     .unwrap_or(false);
-                let exists_on_disk_after = Path::new(&expected_store_path).exists();
+                let exists_on_disk_after = Path::new(&self.physical(&expected_store_path)).exists();
 
                 if exists_after || exists_on_disk_after {
                     // TEMPORARY: tolerate the error if the path exists in the
@@ -275,7 +298,7 @@ impl StoreDriver for NixStore {
         offset: u64,
         length: Option<u64>,
     ) -> Result<(), Error> {
-        let sp = key_to_store_path(&key)?.to_absolute_path();
+        let sp = self.physical(&key_to_store_path(&key)?.to_absolute_path());
         let limit = length.unwrap_or(u64::MAX);
         let mut file = fs::open_file(sp.clone(), offset, limit).await?;
         loop {

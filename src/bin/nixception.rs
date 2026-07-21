@@ -46,7 +46,7 @@ async fn inner_main(
     let mut topo = topology! {
         stores {
             void = Noop,
-            nix_store = Nix { socket_path: None },
+            nix_store = Nix { socket_path: None, ..Default::default() },
             existence_cache = ExistenceCache { backend: nix_store, eviction_policy: None },
         }
         schedulers {

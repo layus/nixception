@@ -30,7 +30,7 @@ async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
             // Leaf stores (children for the wrappers below).
             mem = Memory { eviction_policy: None },
             nop = Noop,
-            nix = Nix { socket_path: None },
+            nix = Nix { socket_path: None, ..Default::default() },
             redis = Redis { ..Default::default() },
             reference = Ref { ..Default::default() },
             aws = Aws { ..Default::default() },
@@ -64,7 +64,7 @@ async fn compile_all_services() -> Result<(), nativelink_error::Error> {
         stores {
             mem = Memory { eviction_policy: None },
             nop = Noop,
-            nix = Nix { socket_path: None },
+            nix = Nix { socket_path: None, ..Default::default() },
         }
         schedulers {
             nix_scheduler = NixProxy { ac_store: nop, cas_store: nix },

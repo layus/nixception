@@ -1196,6 +1196,15 @@ pub struct NixSpec {
     /// The socket of the nix daemon.
     #[serde(default)]
     pub socket_path: Option<String>,
+
+    /// Physical root of a chroot store, e.g. `/tmp/test/store`.  When set, the
+    /// server reads store *contents* under `<store_root>/nix/store/...` instead
+    /// of the literal `/nix/store/...`.  Store paths sent to the daemon, scanned
+    /// for, and put in derivations stay logical (`/nix/store/...`); only the
+    /// server's own filesystem reads are relocated.  `None` (the default) reads
+    /// the real `/nix/store`.  Falls back to the `NIXCEPTION_STORE_ROOT` env var.
+    #[serde(default)]
+    pub store_root: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

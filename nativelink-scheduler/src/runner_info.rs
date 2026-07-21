@@ -265,6 +265,19 @@ fn default_system() -> &'static str {
     }
 }
 
+/// Map a logical store path (`/nix/store/...`) to the physical filesystem path
+/// to read, honoring the optional `NIXCEPTION_STORE_ROOT` chroot-store root.
+/// Identity (returns the input unchanged) when the root is unset — so behavior
+/// is unchanged in a normal deployment.  Mirrors `NixStore::physical`.
+fn physical_store_path(logical_abs_path: &str) -> String {
+    match std::env::var("NIXCEPTION_STORE_ROOT") {
+        Ok(root) if !root.is_empty() => {
+            format!("{}{}", root.trim_end_matches('/'), logical_abs_path)
+        }
+        _ => logical_abs_path.to_string(),
+    }
+}
+
 /// Recursively compute the derivation-hash-modulo for the `.drv` at
 /// `drv_abs_path` by reading it and all its input `.drv` files from
 /// `/nix/store/`.
@@ -290,8 +303,10 @@ pub(crate) fn compute_hash_derivation_modulo(
         return Ok(*hash);
     }
 
-    // Read and parse the .drv file.
-    let drv_bytes = std::fs::read(drv_abs_path)
+    // Read and parse the .drv file.  `drv_abs_path` is the logical
+    // `/nix/store/...` path (used as the cache key and for recursion); the
+    // physical read is relocated under a chroot store when one is configured.
+    let drv_bytes = std::fs::read(physical_store_path(drv_abs_path))
         .map_err(|e| make_err!(Code::Internal, "Reading {drv_abs_path}: {e}"))?;
     let drv = Derivation::from_aterm_bytes(&drv_bytes)
         .map_err(|e| make_err!(Code::Internal, "Parsing {drv_abs_path}: {e:?}"))?;

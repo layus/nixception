@@ -35,6 +35,7 @@ async fn insert_simple() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -51,6 +52,7 @@ async fn read_simple() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -72,6 +74,7 @@ async fn read_part() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -93,6 +96,7 @@ async fn simple_has_object_found() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -111,6 +115,7 @@ async fn simple_has_object_not_found() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -129,6 +134,7 @@ async fn query_path_info_found() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;
@@ -153,6 +159,7 @@ async fn roundtrip() -> Result<(), Error> {
     let store = NixStore::new(
         &(NixSpec {
             socket_path: Some(SOCKET_PATH.to_string()),
+            ..Default::default()
         }),
     )
     .await?;

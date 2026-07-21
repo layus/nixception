@@ -7,6 +7,15 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
 ## [Unreleased]
 
+### Added
+
+- Chroot-store support: `NixSpec.store_root` (config) / `NIXCEPTION_STORE_ROOT`
+  (env) relocate the server's own store *reads* to `<root>/nix/store/...`, so
+  nixception can run against an isolated Nix daemon whose physical store lives
+  outside the real `/nix/store` (paths on the wire and in derivations stay
+  logical `/nix/store/...`). Off by default; unset behaves exactly as before.
+  This is the foundation for standalone (outside-sandbox) integration tests.
+
 ### Changed
 
 - The background cgroup memory sampler (the recurring `nixception-hook: mem …`
