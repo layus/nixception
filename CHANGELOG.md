@@ -9,12 +9,19 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
 ### Added
 
-- Chroot-store support: `NixSpec.store_root` (config) / `NIXCEPTION_STORE_ROOT`
+- chroot-store support: `NixSpec.store_root` (config) / `NIXCEPTION_STORE_ROOT`
   (env) relocate the server's own store *reads* to `<root>/nix/store/...`, so
   nixception can run against an isolated Nix daemon whose physical store lives
   outside the real `/nix/store` (paths on the wire and in derivations stay
   logical `/nix/store/...`). Off by default; unset behaves exactly as before.
-  This is the foundation for standalone (outside-sandbox) integration tests.
+- Standalone (outside-sandbox) integration tests
+  (`nativelink-scheduler/tests/standalone_recc.rs`, run via
+  `just test-standalone`): each spins up a throwaway chroot store + isolated Nix
+  daemon, points a standalone nixception at it, drives `recc` compiles, and
+  asserts on the resulting store (a compile lands as a `-reapi-action` path,
+  distinct compiles differ, an identical re-compile is a cache hit). These
+  exercise the non-sandbox path and enable store-level assertions the
+  derivation-based checks can't.
 
 ### Changed
 

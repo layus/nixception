@@ -38,6 +38,7 @@ bundler
 cacheable
 cgroup
 Chromium
+chroot
 Citrix
 Cloudflare
 CMake
