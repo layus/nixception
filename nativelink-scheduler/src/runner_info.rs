@@ -269,7 +269,7 @@ fn default_system() -> &'static str {
 /// to read, honoring the optional `NIXCEPTION_STORE_ROOT` chroot-store root.
 /// Identity (returns the input unchanged) when the root is unset — so behavior
 /// is unchanged in a normal deployment.  Mirrors `NixStore::physical`.
-fn physical_store_path(logical_abs_path: &str) -> String {
+pub(crate) fn physical_store_path(logical_abs_path: &str) -> String {
     match std::env::var("NIXCEPTION_STORE_ROOT") {
         Ok(root) if !root.is_empty() => {
             format!("{}{}", root.trim_end_matches('/'), logical_abs_path)

@@ -72,7 +72,7 @@ use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::{STORE_DIR_WITH_SLASH, StorePath};
 
 use crate::nix_stats::{NixceptionStats, TimingGuard};
-use crate::runner_info::{RunnerInfo, compute_hash_derivation_modulo};
+use crate::runner_info::{RunnerInfo, compute_hash_derivation_modulo, physical_store_path};
 
 use bstr::BString;
 use bytes::Bytes;
@@ -492,8 +492,14 @@ impl NixWorker {
         // Fold the runner's own timing record into the stats (best-effort),
         // classify the action as cached vs executed, and keep this action's
         // split for the per-action log below.
+        //
+        // The build's `out_path` is logical (`/nix/store/...-reapi-action`); the
+        // server reads its contents (exitcode/stdout/stderr/outputs/timing.json)
+        // from the local filesystem, so relocate it under the chroot store root
+        // when one is configured (identity otherwise).
+        let physical_out_path = physical_store_path(&out_path);
         let runner = self
-            .record_runner_timing(Path::new(&out_path), build_call_wall, exec_elapsed)
+            .record_runner_timing(Path::new(&physical_out_path), build_call_wall, exec_elapsed)
             .await;
 
         // `execute_us` is an "executed actions only" cost center: a cache hit's
@@ -507,7 +513,7 @@ impl NixWorker {
         {
             let _guard = TimingGuard::new(&self.stats, &self.stats.collect_outputs_us);
             let action_result = self
-                .collect_action_result(Path::new(&out_path), &working_directory)
+                .collect_action_result(Path::new(&physical_out_path), &working_directory)
                 .await?;
 
             // Record totals before sending the final update.

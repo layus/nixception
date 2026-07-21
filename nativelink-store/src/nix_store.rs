@@ -300,7 +300,9 @@ impl StoreDriver for NixStore {
     ) -> Result<(), Error> {
         let sp = self.physical(&key_to_store_path(&key)?.to_absolute_path());
         let limit = length.unwrap_or(u64::MAX);
-        let mut file = fs::open_file(sp.clone(), offset, limit).await?;
+        let mut file = fs::open_file(sp.clone(), offset, limit)
+            .await
+            .err_tip(|| format!("NixStore::get_part opening {sp}"))?;
         loop {
             let mut buf = BytesMut::with_capacity(4096);
             file.read_buf(&mut buf)
