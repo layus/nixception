@@ -69,7 +69,6 @@
 #include <nlohmann/json.hpp>
 
 #include <cerrno>
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -107,9 +106,8 @@ static void print_tree(const fs::path &dir, const std::string &prefix = "") {
     }
     std::cerr << prefix << dir.string() << "/" << std::endl;
     for (auto it = fs::recursive_directory_iterator(
-             dir,
-             fs::directory_options::follow_directory_symlink |
-                 fs::directory_options::skip_permission_denied,
+             dir, fs::directory_options::follow_directory_symlink |
+                      fs::directory_options::skip_permission_denied,
              ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         std::string indent(static_cast<size_t>(it.depth() + 1) * 2, ' ');
@@ -173,29 +171,24 @@ static void copy_inputs(const json &manifest) {
         std::error_code ec;
         fs::create_directories(target.parent_path(), ec);
         if (ec) {
-            die("cannot create parent directory for input '" + target.string() +
-                "': " + ec.message());
+            die("cannot create parent directory for input '"
+                + target.string() + "': " + ec.message());
         }
 
-        fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(source, target,
+                      fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            die("cannot copy input " + source.string() + " -> " +
-                target.string() + ": " + ec.message());
+            die("cannot copy input " + source.string()
+                + " -> " + target.string() + ": " + ec.message());
         }
 
         // Make the copy writable (store originals are read-only).
-        fs::perms add_perms = fs::perms::owner_read | fs::perms::owner_write;
-        // Restore the REAPI executable bit: CAS blobs are stored by content
-        // digest, so the store copy does not carry per-reference
-        // executability.
-        if (input.value("executable", false)) {
-            add_perms |= fs::perms::owner_exec | fs::perms::group_exec |
-                         fs::perms::others_exec;
-        }
-        fs::permissions(target, add_perms, fs::perm_options::add, ec);
+        fs::permissions(target,
+                        fs::perms::owner_read | fs::perms::owner_write,
+                        fs::perm_options::add, ec);
         if (ec) {
-            die("cannot chmod input '" + target.string() +
-                "': " + ec.message());
+            die("cannot chmod input '" + target.string()
+                + "': " + ec.message());
         }
     }
 }
@@ -228,8 +221,8 @@ setup_working_directory(const std::string &working_directory) {
         std::error_code ec;
         fs::create_directories(cwd, ec);
         if (ec) {
-            die("cannot create working directory '" + cwd +
-                "': " + ec.message());
+            die("cannot create working directory '" + cwd
+                + "': " + ec.message());
         }
         if (::chdir(cwd.c_str()) != 0) {
             die("chdir('" + cwd + "'): " + std::strerror(errno));
@@ -251,18 +244,18 @@ static void prepare_command_outputs(const json &manifest) {
     auto mkdir_parents = [&](const std::string &p) {
         fs::create_directories(p, ec);
         if (ec) {
-            die("cannot create output directory '" + p + "': " + ec.message());
+            die("cannot create output directory '" + p
+                + "': " + ec.message());
         }
     };
 
     auto mkdir_file_parent = [&](const std::string &p) {
         auto parent = fs::path(p).parent_path();
-        if (parent.empty())
-            return;
+        if (parent.empty()) return;
         fs::create_directories(parent, ec);
         if (ec) {
-            die("cannot create parent directory for output '" + p +
-                "': " + ec.message());
+            die("cannot create parent directory for output '"
+                + p + "': " + ec.message());
         }
     };
 
@@ -308,7 +301,7 @@ static void create_result_dir(const fs::path &out_dir) {
 /// `data()` lazily rebuilds the pointer array whenever new strings have
 /// been pushed since the last call, so callers never see stale pointers.
 class CStringArray {
-  public:
+public:
     void push_back(std::string s) {
         storage_.push_back(std::move(s));
         dirty_ = true;
@@ -323,7 +316,7 @@ class CStringArray {
         return ptrs_.data();
     }
 
-  private:
+private:
     void finalize() const {
         ptrs_.clear();
         for (const auto &s : storage_) {
@@ -334,7 +327,7 @@ class CStringArray {
     }
 
     std::vector<std::string> storage_;
-    mutable std::vector<const char *> ptrs_; // null-terminated
+    mutable std::vector<const char *> ptrs_;  // null-terminated
     mutable bool dirty_ = true;
 };
 
@@ -374,18 +367,13 @@ static CStringArray build_child_argv(const json &manifest) {
 /// then wait for the child and write the exit code to $out/exitcode.
 /// Returns the child's exit code.  Dies on infrastructure failures
 /// (fork, waitpid, file creation).
-static int execute_command(const CStringArray &cmd, const CStringArray &env,
-                           const fs::path &out_dir,
-                           std::chrono::steady_clock::time_point &task_start,
-                           std::chrono::steady_clock::time_point &task_end) {
+static int execute_command(const CStringArray &cmd,
+                           const CStringArray &env,
+                           const fs::path &out_dir) {
     const fs::path stdout_path = out_dir / "stdout";
     const fs::path stderr_path = out_dir / "stderr";
     const fs::path exitcode_path = out_dir / "exitcode";
 
-    // The "task" is the child command itself: from just before fork() to the
-    // moment waitpid() reports it finished.  Writing the exit code and touching
-    // the stdout/stderr files afterwards is wrap-up, not task time.
-    task_start = std::chrono::steady_clock::now();
     pid_t pid = ::fork();
     if (pid < 0) {
         die(std::string("fork: ") + std::strerror(errno));
@@ -418,7 +406,8 @@ static int execute_command(const CStringArray &cmd, const CStringArray &env,
         ::close(fd_err);
 
         // execve with the REAPI environment.
-        ::execvpe(cmd.data()[0], const_cast<char *const *>(cmd.data()),
+        ::execvpe(cmd.data()[0],
+                  const_cast<char *const *>(cmd.data()),
                   const_cast<char *const *>(env.data()));
 
         // If execvpe returns, it failed.
@@ -434,7 +423,6 @@ static int execute_command(const CStringArray &cmd, const CStringArray &env,
             die(std::string("waitpid: ") + std::strerror(errno));
         }
     }
-    task_end = std::chrono::steady_clock::now();
 
     int exit_code;
     if (WIFEXITED(status)) {
@@ -504,26 +492,27 @@ static void copy_with_parents(const fs::path &src, const fs::path &output_path,
     if (fs::is_directory(src, ec)) {
         fs::create_directories(dest, ec);
         if (ec) {
-            die("cannot create output destination directory '" + dest.string() +
-                "': " + ec.message());
+            die("cannot create output destination directory '"
+                + dest.string() + "': " + ec.message());
         }
         fs::copy(src, dest,
-                 fs::copy_options::recursive | fs::copy_options::copy_symlinks,
+                 fs::copy_options::recursive |
+                     fs::copy_options::copy_symlinks,
                  ec);
         if (ec) {
-            die("cannot copy output directory '" + src.string() + "' -> '" +
-                dest.string() + "': " + ec.message());
+            die("cannot copy output directory '" + src.string()
+                + "' -> '" + dest.string() + "': " + ec.message());
         }
     } else {
         fs::create_directories(dest.parent_path(), ec);
         if (ec) {
-            die("cannot create parent for output file '" + dest.string() +
-                "': " + ec.message());
+            die("cannot create parent for output file '"
+                + dest.string() + "': " + ec.message());
         }
         fs::copy_file(src, dest, fs::copy_options::none, ec);
         if (ec) {
-            die("cannot copy output file '" + src.string() + "' -> '" +
-                dest.string() + "': " + ec.message());
+            die("cannot copy output file '" + src.string()
+                + "' -> '" + dest.string() + "': " + ec.message());
         }
     }
 }
@@ -587,48 +576,7 @@ static void collect_command_outputs(const json &manifest,
 
 // ── main ────────────────────────────────────────────────────────────────────
 
-/// Write a machine-readable timing record to `$out/timing.json`, alongside the
-/// existing `exitcode` / `stdout` / `stderr` files.  nixception's
-/// `collect_action_result()` reads this back to break its opaque "command
-/// execution" span into nix→runner latency + runner setup / task / wrap-up.
-///
-/// All durations are in nanoseconds.  `runner_wall_start_ns` is an absolute
-/// wall-clock timestamp (Unix epoch, `system_clock`); the server compares it to
-/// the moment it asked the daemon to build, to derive the nix→runner latency.
-/// Best-effort: any failure is ignored (timing is diagnostic, not essential).
-static void write_timing(const fs::path &out_dir, long long runner_wall_start_ns,
-                         long long setup_ns, long long task_ns,
-                         long long wrapup_ns) {
-    json timing = {
-        {"schema", 1},
-        {"runner_wall_start_ns", runner_wall_start_ns},
-        {"setup_ns", setup_ns},
-        {"task_ns", task_ns},
-        {"wrapup_ns", wrapup_ns},
-    };
-    std::error_code ec;
-    std::ofstream ofs(out_dir / "timing.json");
-    if (ofs) {
-        ofs << timing.dump();
-    }
-}
-
 int main() {
-    using clock = std::chrono::steady_clock;
-    const auto ns = [](clock::duration d) {
-        return static_cast<long long>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
-    };
-
-    // Absolute wall-clock start (Unix epoch) so the server can measure the gap
-    // between its build request to the daemon and the runner actually starting.
-    const long long runner_wall_start_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    const auto t_start = clock::now();
-
-    // ── SETUP ────────────────────────────────────────────────────────────
     // 1. Read manifest and $out.
     json manifest = read_manifest();
     fs::path out_dir = get_out_dir();
@@ -648,30 +596,16 @@ int main() {
     CStringArray env = build_child_env(manifest);
     CStringArray cmd = build_child_argv(manifest);
 
-    // ── TASK ─────────────────────────────────────────────────────────────
     // 5. Fork, exec, wait.  The child's exit code is written to
     //    $out/exitcode; the runner itself only fails on infrastructure
-    //    errors, not on command failure.  execute_command records the exact
-    //    fork→waitpid span into task_start/task_end.
-    clock::time_point task_start{}, task_end{};
-    execute_command(cmd, env, out_dir, task_start, task_end);
+    //    errors, not on command failure.
+    execute_command(cmd, env, out_dir);
     //print_tree(".");
 
-    // ── WRAP-UP ──────────────────────────────────────────────────────────
     // 6. Collect declared command outputs into $out/outputs/.
     //    Missing outputs are silently skipped.
     collect_command_outputs(manifest, out_dir, working_directory);
     //print_tree(out_dir);
-    const auto t_end = clock::now();
-
-    // "setup" spans everything before the child ran; "task" is the child's own
-    // execution; "wrap-up" is output collection after it finished.  The tiny
-    // gaps (t_setup_done→task_start, task_end→collect start) are attributed to
-    // setup and wrap-up respectively so the three sum to the runner's runtime.
-    write_timing(out_dir, runner_wall_start_ns,
-                 /*setup_ns=*/ns(task_start - t_start),
-                 /*task_ns=*/ns(task_end - task_start),
-                 /*wrapup_ns=*/ns(t_end - task_end));
 
     // The runner itself always exits 0.  The action's real exit code is
     // recorded in $out/exitcode and interpreted by nixception's

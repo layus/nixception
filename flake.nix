@@ -6,7 +6,12 @@
 
   inputs = {
     self.submodules = true;
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Pinned to the upstream nixpkgs base the integration checks (and the
+    # nixpkgs `nixception` fork) were written against — recc-nix needs
+    # `overrideAllMesonComponents`, the bazel checks need
+    # bazel_8/build-support/bazelPackage.nix, and protoc-gen-js's newer
+    # packaging, all of which postdate the previous nixos-unstable pin.
+    nixpkgs.url = "github:NixOS/nixpkgs/f4220f112a5a6bdc03a69ce1633d099005174edc";
     flake-parts.url = "github:hercules-ci/flake-parts";
     git-hooks = {
       url = "github:cachix/git-hooks.nix";
@@ -217,6 +222,16 @@
         nativelink = nativelinkFor nativeTargetPkgs;
         nixception = nixceptionFor nativeTargetPkgs;
         nixceptionHook = nixceptionHookFor nativeTargetPkgs;
+
+        # The nixception integration checks (recc-* and bazel-*).  Defined as a
+        # plain function of the host `pkgs` and the locally-built `nixceptionHook`
+        # — it depends only on upstream nixpkgs (the recc-wrapped compiler is
+        # reimplemented from the upstream `buildbox` recc binary), so no forked
+        # nixpkgs is required.  Each entry needs the `recursive-nix` system
+        # feature at build time.
+        nixceptionChecks = import ./checks/nixception-checks.nix {
+          inherit pkgs nixceptionHook;
+        };
 
         # These two can be built by all build platforms. This is not true for
         # darwin targets which are only buildable via native compilation.
@@ -471,9 +486,21 @@
             else {}
           );
         checks = {
-          # Include the recc recursive-nix integration test so that
-          # `nix flake check` will build and run it.
-          inherit (packages) recc-recursive-nix-test;
+          # The nixception integration checks.  Each builds a real project (GNU
+          # hello, spdlog, Nix itself, bazel targets, …) with its compile/spawn
+          # actions dispatched to a nixception server the setup hook starts, so
+          # `nix flake check` exercises the end-to-end remote-execution path.
+          # All require the `recursive-nix` system feature to be enabled.
+          inherit
+            (nixceptionChecks)
+            recc-smoke-test
+            recc-hello
+            recc-spdlog
+            recc-nix
+            bazel-rules-nixpkgs-hello
+            bazel-abseil-cpp
+            protoc-gen-js-with-nixception
+            ;
         };
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {
