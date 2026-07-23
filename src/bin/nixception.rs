@@ -110,7 +110,20 @@ async fn inner_main(
     Ok(())
 }
 
+/// Version string baked in at compile time by `build.rs` (git-describe derived,
+/// or the `NIXCEPTION_VERSION` override the Nix package injects).
+const VERSION: &str = env!("NIXCEPTION_VERSION");
+
 fn main() -> Result<(), Box<dyn core::error::Error>> {
+    // `nixception` otherwise takes no arguments and boots a long-running gRPC
+    // server, so handle `--version`/`-V` here before anything else — printing
+    // and exiting rather than starting the server (which would hang callers
+    // such as `testers.testVersion`).
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("nixception {VERSION}");
+        return Ok(());
+    }
+
     // nixception is configured with `NIXCEPTION_LOG` rather than `RUST_LOG`.
     // The tracing filter (in `nativelink-util`) reads `RUST_LOG`, so bridge the
     // value across before tracing is initialised. `NIXCEPTION_LOG` takes

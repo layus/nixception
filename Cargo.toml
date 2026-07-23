@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 name = "nativelink"
 rust-version = "1.87.0"
-version = "0.7.0"
+version = "0.4.0"
 
 [profile.release]
 lto = true
@@ -18,9 +18,6 @@ debug = false
 inherits = "dev"
 opt-level = "z"
 strip = true
-
-[[bin]]
-name = "nativelink"
 
 [[bin]]
 name = "nixception"
@@ -48,7 +45,6 @@ nativelink-worker = { path = "nativelink-worker" }
 
 async-lock = { version = "3.4.0", features = ["std"], default-features = false }
 axum = { version = "0.8.3", default-features = false }
-clap = { version = "4.5.35", features = ["derive"] }
 futures = { version = "0.3.31", default-features = false }
 hyper = "1.6.0"
 hyper-util = "0.1.11"
