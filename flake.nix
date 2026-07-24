@@ -223,15 +223,46 @@
         nixception = nixceptionFor nativeTargetPkgs;
         nixceptionHook = nixceptionHookFor nativeTargetPkgs;
 
-        # The nixception integration checks (recc-* and bazel-*).  Defined as a
-        # plain function of the host `pkgs` and the locally-built `nixceptionHook`
-        # — it depends only on upstream nixpkgs (the recc-wrapped compiler is
-        # reimplemented from the upstream `buildbox` recc binary), so no forked
-        # nixpkgs is required.  Each entry needs the `recursive-nix` system
-        # feature at build time.
-        nixceptionChecks = import ./checks/nixception-checks.nix {
-          inherit pkgs nixceptionHook;
-        };
+        # Fixture for the standalone (outside-sandbox) integration tests in
+        # nativelink-scheduler/tests/standalone_recc.rs: a directory of symlinks
+        # to every tool the Rust harness needs, plus the pre-built runner (out +
+        # drv).  The test is gated on env vars pointing into this fixture, so run
+        # it with e.g.:
+        #
+        #   fixture=$(nix build --impure --no-link --print-out-paths \
+        #     '.?submodules=1#standalone-test-fixture')
+        #   export NIXCEPTION_FIXTURE_BIN="$fixture/bin"
+        #   export NIXCEPTION_FIXTURE_RUNNER_OUT="$(cat "$fixture/runner-out")"
+        #   export NIXCEPTION_FIXTURE_RUNNER_DRV="$(cat "$fixture/runner-drv")"
+        #   export NIXCEPTION_FIXTURE_NIXCEPTION="$(cat "$fixture/nixception")"
+        #   export NIXCEPTION_FIXTURE_GCC="$(cat "$fixture/gcc")"
+        #   cargo test --workspace --test standalone_recc -- --test-threads=1 --nocapture
+        standalone-test-fixture = let
+          # The runner must match the one nixception's hook uses so the
+          # reapi-action derivations (and their cache) line up — build it from
+          # this repo's tools/runner.nix, with the test compiler baked into its
+          # sandbox.
+          runner = pkgs.callPackage ./tools/runner.nix {
+            extraRuntimeInputs = [pkgs.gcc pkgs.binutils pkgs.coreutils];
+          };
+        in
+          pkgs.runCommand "nixception-standalone-fixture" {} ''
+            mkdir -p $out/bin
+            ln -s ${pkgs.nix}/bin/nix            $out/bin/nix
+            ln -s ${pkgs.nix}/bin/nix-store      $out/bin/nix-store
+            ln -s ${pkgs.buildbox}/bin/recc      $out/bin/recc
+            # Record the runner output + derivation paths for RunnerInfo.
+            echo -n "${runner}"          > $out/runner-out
+            echo -n "${runner.drvPath}"  > $out/runner-drv
+            # The nixception binary under test: the one this flake builds from
+            # local source.
+            echo -n "${nixception}/bin/nixception" > $out/nixception
+            # The REAL compiler store paths.  recc must be invoked with these (not
+            # a symlink) so nixception scans them as /nix/store references and
+            # includes the compiler in the reapi-action sandbox.
+            echo -n "${pkgs.gcc}/bin/gcc"   > $out/gcc
+            echo -n "${pkgs.gcc}/bin/g++"   > $out/g++
+          '';
 
         # These two can be built by all build platforms. This is not true for
         # darwin targets which are only buildable via native compilation.
@@ -410,6 +441,7 @@
               nativelink
               nixception
               nixceptionHook
+              standalone-test-fixture
               nativelinkCoverageForHost
               nativelink-aarch64-linux
               nativelink-image
@@ -486,21 +518,13 @@
             else {}
           );
         checks = {
-          # The nixception integration checks.  Each builds a real project (GNU
-          # hello, spdlog, Nix itself, bazel targets, …) with its compile/spawn
-          # actions dispatched to a nixception server the setup hook starts, so
-          # `nix flake check` exercises the end-to-end remote-execution path.
-          # All require the `recursive-nix` system feature to be enabled.
-          inherit
-            (nixceptionChecks)
-            recc-smoke-test
-            recc-hello
-            recc-spdlog
-            recc-nix
-            bazel-rules-nixpkgs-hello
-            bazel-abseil-cpp
-            protoc-gen-js-with-nixception
-            ;
+          # The recc / reccStdenv integration checks live in the nixpkgs
+          # `nixception` fork (reccStdenv.tests.*, recc.passthru.tests.*,
+          # nixceptionHook.passthru.tests.*), built against the fork's real
+          # reccStdenv.  This repo's own coverage of the end-to-end path is the
+          # standalone (outside-sandbox) test — see standalone-test-fixture and
+          # nativelink-scheduler/tests/standalone_recc.rs — which is driven by
+          # cargo, not `nix flake check`.
         };
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {
