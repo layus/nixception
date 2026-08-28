@@ -55,4 +55,4 @@ jobs:
       - name: Smoke-test binaries
         run: |
           test -x result/bin/nixception
-          ./result/bin/nativelink --version
+          ./result/bin/nixception --version
