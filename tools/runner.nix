@@ -6,6 +6,9 @@
 # command, and expected outputs, then executes the action using direct system
 # calls — avoiding the overhead of generating and evaluating a bash script.
 #
+# The actual build/install steps live in tools/Makefile so they can also be
+# run outside Nix (e.g. `make -C tools` while hacking on runner.cpp).
+#
 # The derivation produces:
 #
 #   $out/bin/runner      – the C++ binary (used as the derivation builder)
@@ -41,35 +44,28 @@
 in
   stdenv.mkDerivation {
     name = "runner";
-    src = ./runner.cpp;
+    src = lib.fileset.toSource {
+      root = ./.;
+      fileset = lib.fileset.unions [./Makefile ./runner.cpp];
+    };
 
     # nlohmann_json is header-only; we only need its include path at compile
     # time.  Putting it in buildInputs lets the CC wrapper find the headers
     # automatically via NIX_CFLAGS_COMPILE / -isystem.
     buildInputs = [nlohmann_json];
 
-    # Single source file — no configure step or build system needed.
-    dontUnpack = true;
     dontConfigure = true;
 
-    buildPhase = ''
-      runHook preBuild
-      $CXX -std=c++17 -O2 -Wall -Wextra -o runner $src
-      runHook postBuild
-    '';
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out/bin $out/nix-support
-      cp runner $out/bin/runner
-
+    # $out is already exported into the build environment; the Makefile picks
+    # it up directly (`out ?= ...` isn't needed since make reads env vars).
+    postInstall = ''
       # Reference every sandbox-input store path so the Nix scanner keeps
       # them in the runner's closure.  Without this the sandbox for
       # reapi-action derivations (which declare the runner as an input
       # derivation) would not contain these tools.
+      mkdir -p $out/nix-support
       echo "${lib.concatMapStringsSep " " toString sandboxInputs}" \
         > $out/nix-support/sandbox-inputs
-      runHook postInstall
     '';
 
     meta = {
