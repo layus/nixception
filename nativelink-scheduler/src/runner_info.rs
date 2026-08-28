@@ -137,10 +137,10 @@ impl RunnerInfo {
 // ---------------------------------------------------------------------------
 
 /// The runner sources, bundled into the binary so the server can build the
-/// runner without any external files.  `nativelink/tools/` is the canonical
-/// copy (the nixpkgs packaging mirror may drift independently).
-const RUNNER_NIX: &str = include_str!("../../tools/runner.nix");
-const RUNNER_CPP: &str = include_str!("../../tools/runner.cpp");
+/// runner without any external files.  `nativelink/tools/runner/` is the
+/// canonical copy (the nixpkgs packaging mirror may drift independently).
+const RUNNER_NIX: &str = include_str!("../../tools/runner/runner.nix");
+const RUNNER_CPP: &str = include_str!("../../tools/runner/runner.cpp");
 
 /// Default nixpkgs used to build the runner when `NIXCEPTION_NIXPKGS` is not
 /// set.  Pinned to the same revision as the flake's `nixpkgs` input so the

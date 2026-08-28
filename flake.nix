@@ -98,9 +98,9 @@
           filter = path: type:
             (builtins.match "^.*(examples/.+\.json5|data/.+|nativelink-config/README\.md)" path != null)
             # The nixception scheduler embeds the runner sources via
-            # include_str!("../../tools/runner.{nix,cpp}"), so they must survive
-            # the cargo-source filter.
-            || (builtins.match "^.*tools/runner\.(nix|cpp)$" path != null)
+            # include_str!("../../tools/runner/{runner.nix,runner.cpp}"), so
+            # they must survive the cargo-source filter.
+            || (builtins.match "^.*tools/runner/runner\.(nix|cpp)$" path != null)
             || ((craneLibFor pkgs).filterCargoSources path type);
         };
 
@@ -240,9 +240,9 @@
         standalone-test-fixture = let
           # The runner must match the one nixception's hook uses so the
           # reapi-action derivations (and their cache) line up — build it from
-          # this repo's tools/runner.nix, with the test compiler baked into its
-          # sandbox.
-          runner = pkgs.callPackage ./tools/runner.nix {
+          # this repo's tools/runner/runner.nix, with the test compiler baked
+          # into its sandbox.
+          runner = pkgs.callPackage ./tools/runner/runner.nix {
             extraRuntimeInputs = [pkgs.gcc pkgs.binutils pkgs.coreutils];
           };
         in

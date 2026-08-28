@@ -1,4 +1,4 @@
-# tools/runner.nix
+# tools/runner/runner.nix
 #
 # The "runner" is a small C++ program used as the `builder` of every REAPI
 # action derivation that nixception creates.  It reads a JSON manifest (passed
@@ -6,8 +6,13 @@
 # command, and expected outputs, then executes the action using direct system
 # calls — avoiding the overhead of generating and evaluating a bash script.
 #
-# The actual build/install steps live in tools/Makefile so they can also be
-# run outside Nix (e.g. `make -C tools` while hacking on runner.cpp).
+# A standalone tools/runner/Makefile also exists for building runner.cpp
+# outside Nix (e.g. `make -C tools/runner` while hacking on it), but this
+# derivation does not use it — it compiles directly so the embedded self-build
+# path in nativelink-scheduler/src/runner_info.rs (which bundles this file and
+# runner.cpp via include_str!) has no external Makefile dependency. Other
+# consumers who want a make-based build write their own .nix file around the
+# Makefile.
 #
 # The derivation produces:
 #
@@ -23,7 +28,7 @@
 # extraRuntimeInputs is placed first so caller-supplied tools shadow the
 # built-in defaults (coreutils, util-linux, bashNonInteractive).
 #
-# This file is called from flake.nix via `pkgs.callPackage ./tools/runner.nix`.
+# This file is called from flake.nix via `pkgs.callPackage ./tools/runner/runner.nix`.
 {
   stdenv,
   nlohmann_json,
@@ -44,28 +49,35 @@
 in
   stdenv.mkDerivation {
     name = "runner";
-    src = lib.fileset.toSource {
-      root = ./.;
-      fileset = lib.fileset.unions [./Makefile ./runner.cpp];
-    };
+    src = ./runner.cpp;
 
     # nlohmann_json is header-only; we only need its include path at compile
     # time.  Putting it in buildInputs lets the CC wrapper find the headers
     # automatically via NIX_CFLAGS_COMPILE / -isystem.
     buildInputs = [nlohmann_json];
 
+    # Single source file — no configure step or build system needed.
+    dontUnpack = true;
     dontConfigure = true;
 
-    # $out is already exported into the build environment; the Makefile picks
-    # it up directly (`out ?= ...` isn't needed since make reads env vars).
-    postInstall = ''
+    buildPhase = ''
+      runHook preBuild
+      $CXX -std=c++17 -O2 -Wall -Wextra -o runner $src
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/bin $out/nix-support
+      cp runner $out/bin/runner
+
       # Reference every sandbox-input store path so the Nix scanner keeps
       # them in the runner's closure.  Without this the sandbox for
       # reapi-action derivations (which declare the runner as an input
       # derivation) would not contain these tools.
-      mkdir -p $out/nix-support
       echo "${lib.concatMapStringsSep " " toString sandboxInputs}" \
         > $out/nix-support/sandbox-inputs
+      runHook postInstall
     '';
 
     meta = {

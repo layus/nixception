@@ -34,7 +34,7 @@
   # precedence.
   extraRuntimeInputs ? [],
 }: let
-  runner = callPackage ./runner.nix {inherit extraRuntimeInputs;};
+  runner = callPackage ./runner/runner.nix {inherit extraRuntimeInputs;};
 
   hook = makeSetupHook {
     name = "nixception-hook";

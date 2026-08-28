@@ -1,4 +1,4 @@
-// tools/runner.cpp
+// tools/runner/runner.cpp
 //
 // The "runner" is a small C++ program used as the `builder` of every REAPI
 // action derivation that nixception creates.  It replaces the previous bash
