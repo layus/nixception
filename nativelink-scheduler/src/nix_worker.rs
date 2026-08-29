@@ -1133,6 +1133,12 @@ impl NixWorker {
             discovered_store_paths.extend(file_paths);
         }
 
+        // Extra paths configured via NIXCEPTION_EXTRA_SANDBOX_PATHS (e.g. a
+        // toolchain the executed command needs but that isn't otherwise
+        // referenced anywhere the scanner above looks). Resolved identically
+        // to any other discovered path below.
+        discovered_store_paths.extend(self.runner_info.extra_sandbox_paths.iter().cloned());
+
         // The CAS entries are already going into input_sources; exclude
         // them from the "discovered" set so we don't query the daemon
         // for paths we already own.

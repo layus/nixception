@@ -97,10 +97,6 @@
           src = (craneLibFor pkgs).path ./.;
           filter = path: type:
             (builtins.match "^.*(examples/.+\.json5|data/.+|nativelink-config/README\.md)" path != null)
-            # The nixception scheduler embeds the runner sources via
-            # include_str!("../../tools/runner/{runner.nix,runner.cpp}"), so
-            # they must survive the cargo-source filter.
-            || (builtins.match "^.*tools/runner/runner\.(nix|cpp)$" path != null)
             || ((craneLibFor pkgs).filterCargoSources path type);
         };
 
@@ -182,34 +178,41 @@
             }
           );
 
+        # The runner is built once per host platform (it never needs to be
+        # cross-compiled the way the server itself does): a plain
+        # pkgs.callPackage build of tools/runner/runner.nix.  Only nixception
+        # is in charge of the runner — consumers never build or configure
+        # their own; extra sandbox tools go through
+        # NIXCEPTION_EXTRA_SANDBOX_PATHS instead (see nixceptionHookFor).
+        runner = pkgs.callPackage ./tools/runner/runner.nix {};
+
         nixceptionFor = p:
-          (craneLibFor p).buildPackage (
+          ((craneLibFor p).buildPackage (
             (commonArgsFor p)
             // {
               cargoArtifacts = cargoArtifactsFor p;
               cargoExtraArgs = "--bin nixception";
+              # The runner's store paths, baked into the binary at *compile*
+              # time via Rust's env!() (see
+              # nativelink-scheduler/src/runner_info.rs) — not a runtime env
+              # var, so nixceptionHook (or anyone else running this binary)
+              # has no say in which runner it uses.
+              NIXCEPTION_RUNNER_OUT = "${runner}";
+              NIXCEPTION_RUNNER_DRV = "${runner.drvPath}";
             }
-          );
+          ))
+          // {
+            passthru.runner = runner;
+          };
 
         # nixceptionHookFor builds the setup hook for a given nixception binary.
         # The hook starts a nixception server before the build phase and stops
-        # it afterwards.  extraRuntimeInputs are forwarded to the runner so
-        # they are available inside the remote-execution sandbox.
-        #
-        # withPackages is a convenience wrapper around .override that avoids
-        # spelling out the argument name at the call site:
-        #
-        #   nixceptionHook.withPackages [ gppSleeper ]
-        #   # equivalent to:
-        #   nixceptionHook.override { extraRuntimeInputs = [ gppSleeper ]; }
-        nixceptionHookFor = p: let
-          hook = pkgs.callPackage ./tools/nixception-hook.nix {
+        # it afterwards, wiring in the runner nixception itself owns (built
+        # once above) — nixceptionHook carries no runner-related configuration
+        # of its own.
+        nixceptionHookFor = p:
+          pkgs.callPackage ./tools/nixception-hook.nix {
             nixception = nixceptionFor p;
-          };
-        in
-          hook
-          // {
-            withPackages = packages: hook.override {extraRuntimeInputs = packages;};
           };
 
         nativeTargetPkgs =
@@ -226,8 +229,8 @@
         # Fixture for the standalone (outside-sandbox) integration tests in
         # nativelink-scheduler/tests/standalone_recc.rs: a directory of symlinks
         # to every tool the Rust harness needs, plus the pre-built runner (out +
-        # drv).  The test is gated on env vars pointing into this fixture, so run
-        # it with e.g.:
+        # drv) and the extra-sandbox-paths toolset.  The test is gated on env
+        # vars pointing into this fixture, so run it with e.g.:
         #
         #   fixture=$(nix build --impure --no-link --print-out-paths \
         #     '.?submodules=1#standalone-test-fixture')
@@ -236,15 +239,17 @@
         #   export NIXCEPTION_FIXTURE_RUNNER_DRV="$(cat "$fixture/runner-drv")"
         #   export NIXCEPTION_FIXTURE_NIXCEPTION="$(cat "$fixture/nixception")"
         #   export NIXCEPTION_FIXTURE_GCC="$(cat "$fixture/gcc")"
+        #   export NIXCEPTION_FIXTURE_EXTRA_SANDBOX_PATHS="$(cat "$fixture/extra-sandbox-paths")"
         #   cargo test --workspace --test standalone_recc -- --test-threads=1 --nocapture
         standalone-test-fixture = let
           # The runner must match the one nixception's hook uses so the
-          # reapi-action derivations (and their cache) line up — build it from
-          # this repo's tools/runner/runner.nix, with the test compiler baked
-          # into its sandbox.
-          runner = pkgs.callPackage ./tools/runner/runner.nix {
-            extraRuntimeInputs = [pkgs.gcc pkgs.binutils pkgs.coreutils];
-          };
+          # reapi-action derivations (and their cache) line up — the same
+          # nixception.passthru.runner the hook wires in, no test-specific
+          # runner build.  The test compiler toolchain instead goes through
+          # NIXCEPTION_EXTRA_SANDBOX_PATHS, exactly as a real consumer would
+          # configure it.
+          runner = nixception.passthru.runner;
+          extraSandboxPaths = [pkgs.gcc pkgs.binutils pkgs.coreutils];
         in
           pkgs.runCommand "nixception-standalone-fixture" {} ''
             mkdir -p $out/bin
@@ -262,6 +267,10 @@
             # includes the compiler in the reapi-action sandbox.
             echo -n "${pkgs.gcc}/bin/gcc"   > $out/gcc
             echo -n "${pkgs.gcc}/bin/g++"   > $out/g++
+            # The toolset for NIXCEPTION_EXTRA_SANDBOX_PATHS: colon-separated,
+            # matching the env var's own format.
+            echo -n "${lib.concatMapStringsSep ":" toString extraSandboxPaths}" \
+              > $out/extra-sandbox-paths
           '';
 
         # These two can be built by all build platforms. This is not true for

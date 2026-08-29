@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use nativelink_error::{Code, Error, ResultExt, make_err};
+use nativelink_error::{Code, Error, make_err};
 use nix_compat::derivation::Derivation;
 use nix_compat::store_path::StorePath;
 
@@ -38,82 +38,69 @@ pub struct RunnerInfo {
 
     /// The Nix `system` string (e.g. `"x86_64-linux"`, `"aarch64-linux"`).
     pub system: String,
+
+    /// Extra `/nix/store/…` paths to make available in every reapi-action
+    /// sandbox, from `NIXCEPTION_EXTRA_SANDBOX_PATHS` (colon-separated).
+    /// Merged into each action's discovered store paths and resolved the
+    /// same way (deriver lookup + hash-derivation-modulo, or a plain input
+    /// source) — see [`NixWorker::resolve_discovered_store_paths`].
+    pub extra_sandbox_paths: Vec<StorePath<String>>,
 }
 
+/// The runner's output and `.drv` store paths, baked into the binary at
+/// compile time via `env!()` (Cargo re-evaluates this automatically if the
+/// variable changes — no `build.rs` needed).  There is no runtime knob for
+/// these: exactly one nixception build is paired with exactly one runner
+/// build, wired together by packaging (the nixpkgs `nixception` package, or
+/// this repo's own flake), never by the user.
+///
+/// Compile-time (rather than runtime env vars) also means a missing/invalid
+/// value is a build failure, not something discovered only when the server
+/// first tries to schedule an action.
+const RUNNER_OUT: &str = env!(
+    "NIXCEPTION_RUNNER_OUT",
+    "NIXCEPTION_RUNNER_OUT must be set at build time to the runner's store \
+     path (e.g. by the nixpkgs `nixception` package.nix, which builds the \
+     runner as passthru.runner and sets this via `env.*`)."
+);
+const RUNNER_DRV: &str = env!(
+    "NIXCEPTION_RUNNER_DRV",
+    "NIXCEPTION_RUNNER_DRV must be set at build time to the runner's .drv \
+     store path, alongside NIXCEPTION_RUNNER_OUT."
+);
+
 impl RunnerInfo {
-    /// Obtain runner metadata, preferring pre-built runner paths supplied via
-    /// the environment and otherwise building the runner ourselves through the
-    /// recursive-nix daemon.
+    /// Obtain runner metadata: the runner's own paths are fixed at compile
+    /// time ([`RUNNER_OUT`]/[`RUNNER_DRV`]); the hash-derivation-modulo is
+    /// computed now by reading `.drv` files from the store (which may not
+    /// have existed yet at compile time), and the rest comes from the
+    /// process environment.
     ///
-    /// The `socket_path` is the Nix daemon socket (from the `NixStore`); it is
-    /// only used for the self-build path.
-    pub fn discover(socket_path: &str) -> Result<Self, Error> {
-        match Self::try_from_env()? {
-            Some(info) => Ok(info),
-            None => Self::build_with_nix(socket_path)
-                .err_tip(|| "Building the nixception runner via recursive-nix"),
-        }
-    }
+    /// Environment variables read:
+    ///
+    /// - `NIXCEPTION_SYSTEM` — optional, defaults to the build-time target
+    ///   architecture
+    /// - `NIXCEPTION_EXTRA_SANDBOX_PATHS` — optional, colon-separated
+    ///   `/nix/store/…` paths to add to every action sandbox; this one *is*
+    ///   meant to vary per server invocation (deployment config), unlike the
+    ///   runner identity
+    pub fn discover() -> Result<Self, Error> {
+        let system = std::env::var("NIXCEPTION_SYSTEM")
+            .ok()
+            .unwrap_or_else(|| default_system().to_string());
+        let extra_sandbox_paths = std::env::var("NIXCEPTION_EXTRA_SANDBOX_PATHS")
+            .ok()
+            .map(|v| parse_extra_sandbox_paths(&v))
+            .transpose()?
+            .unwrap_or_default();
 
-    /// Discover runner metadata from environment variables, if they are set.
-    ///
-    /// Returns `Ok(None)` when neither `NIXCEPTION_RUNNER_OUT` nor
-    /// `NIXCEPTION_RUNNER_DRV` is set (the caller should then build the runner
-    /// itself). Returns `Err` when the variables are set but malformed, or
-    /// only one of the pair is present.
-    ///
-    /// Expected environment variables (set by the setup hook or a dev shell):
-    ///
-    /// - `NIXCEPTION_RUNNER_OUT` — store path of the runner output,
-    ///   e.g. `/nix/store/…-runner`
-    /// - `NIXCEPTION_RUNNER_DRV` — store path of the runner `.drv`,
-    ///   e.g. `/nix/store/…-runner.drv`
-    /// - `NIXCEPTION_SYSTEM` — optional, defaults to the build-time
-    ///   target architecture
-    pub fn try_from_env() -> Result<Option<Self>, Error> {
-        let runner_out = std::env::var("NIXCEPTION_RUNNER_OUT").ok();
-        let runner_drv = std::env::var("NIXCEPTION_RUNNER_DRV").ok();
-
-        match (runner_out, runner_drv) {
-            // Neither set: signal the caller to build the runner itself.
-            (None, None) => Ok(None),
-            (Some(runner_out), Some(runner_drv)) => {
-                let system = std::env::var("NIXCEPTION_SYSTEM").ok();
-                Self::from_paths(&runner_out, &runner_drv, system).map(Some)
-            }
-            // Exactly one set: almost certainly a misconfiguration.
-            (Some(_), None) => Err(make_err!(
-                Code::InvalidArgument,
-                "NIXCEPTION_RUNNER_OUT is set but NIXCEPTION_RUNNER_DRV is not. \
-                 Set both, or neither to build the runner automatically."
-            )),
-            (None, Some(_)) => Err(make_err!(
-                Code::InvalidArgument,
-                "NIXCEPTION_RUNNER_DRV is set but NIXCEPTION_RUNNER_OUT is not. \
-                 Set both, or neither to build the runner automatically."
-            )),
-        }
-    }
-
-    /// Construct a [`RunnerInfo`] from the runner's output and `.drv` store
-    /// paths, computing the derivation-hash-modulo by walking `.drv` files in
-    /// the store.
-    ///
-    /// `system` defaults to the build-time target architecture when `None`.
-    fn from_paths(
-        runner_out: &str,
-        runner_drv: &str,
-        system: Option<String>,
-    ) -> Result<Self, Error> {
-        let system = system.unwrap_or_else(|| default_system().to_string());
-
-        let builder_path = format!("{runner_out}/bin/runner");
+        let builder_path = format!("{RUNNER_OUT}/bin/runner");
 
         // Parse the .drv store path using nix-compat.
-        let drv_store_path = StorePath::from_absolute_path(runner_drv.as_bytes()).map_err(|e| {
+        let drv_store_path = StorePath::from_absolute_path(RUNNER_DRV.as_bytes()).map_err(|e| {
             make_err!(
                 Code::InvalidArgument,
-                "Bad runner .drv path ({runner_drv}): {e}"
+                "Bad runner .drv path ({RUNNER_DRV}): {e}"
             )
         })?;
 
@@ -121,137 +108,33 @@ impl RunnerInfo {
         // files.  This terminates at fixed-output derivations (fetchurl,
         // bootstrap tarballs, etc.).
         let mut cache = HashMap::new();
-        let hash_derivation_modulo = compute_hash_derivation_modulo(runner_drv, &mut cache)?;
+        let hash_derivation_modulo = compute_hash_derivation_modulo(RUNNER_DRV, &mut cache)?;
 
         Ok(Self {
             builder_path,
             drv_store_path,
             hash_derivation_modulo,
             system,
+            extra_sandbox_paths,
         })
     }
 }
 
-// ---------------------------------------------------------------------------
-// Self-build via recursive-nix
-// ---------------------------------------------------------------------------
-
-/// The runner sources, bundled into the binary so the server can build the
-/// runner without any external files.  `nativelink/tools/runner/` is the
-/// canonical copy (the nixpkgs packaging mirror may drift independently).
-const RUNNER_NIX: &str = include_str!("../../tools/runner/runner.nix");
-const RUNNER_CPP: &str = include_str!("../../tools/runner/runner.cpp");
-
-/// Default nixpkgs used to build the runner when `NIXCEPTION_NIXPKGS` is not
-/// set.  Pinned to the same revision as the flake's `nixpkgs` input so the
-/// self-built runner matches the one the flake's own checks build.
-const DEFAULT_NIXPKGS_URL: &str =
-    "https://github.com/NixOS/nixpkgs/archive/8c441601c43232976179eac52dde704c8bdf81ed.tar.gz";
-const DEFAULT_NIXPKGS_SHA256: &str = "16r7z12kmznnbw7w1fq39f3n0g8a6mqnny2y73m7qivjxilfcqxb";
-
-impl RunnerInfo {
-    /// Build the runner ourselves through the recursive-nix daemon and return
-    /// its metadata.
-    ///
-    /// The bundled `runner.nix` / `runner.cpp` are written to a private
-    /// temporary directory and built with the `nix` CLI, pointed at the
-    /// recursive-nix daemon via `NIX_REMOTE=unix://<socket_path>`. nixpkgs is
-    /// taken from `NIXCEPTION_NIXPKGS` when set (a path or flake-style
-    /// reference usable as `import <ref> {}`), otherwise from a pinned
-    /// `fetchTarball` matching the flake's nixpkgs.
-    pub fn build_with_nix(socket_path: &str) -> Result<Self, Error> {
-        // Write the bundled sources to a private temp dir. runner.nix does
-        // `src = ./runner.cpp`, so the two files must sit side by side.
-        let tmp = std::env::temp_dir().join(format!("nixception-runner-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp)
-            .map_err(|e| make_err!(Code::Internal, "Creating runner build dir: {e}"))?;
-        std::fs::write(tmp.join("runner.nix"), RUNNER_NIX)
-            .map_err(|e| make_err!(Code::Internal, "Writing runner.nix: {e}"))?;
-        std::fs::write(tmp.join("runner.cpp"), RUNNER_CPP)
-            .map_err(|e| make_err!(Code::Internal, "Writing runner.cpp: {e}"))?;
-
-        let runner_nix_path = tmp.join("runner.nix");
-        let runner_nix_path = runner_nix_path.to_string_lossy();
-
-        // The nixpkgs to build against. When NIXCEPTION_NIXPKGS is set we
-        // import it directly (a store path, a channel path, or anything else
-        // `import` accepts); otherwise fetch the pinned tarball purely.
-        let nixpkgs_expr = match std::env::var("NIXCEPTION_NIXPKGS") {
-            Ok(reference) if !reference.is_empty() => format!("import ({reference}) {{}}"),
-            _ => format!(
-                "import (builtins.fetchTarball {{ \
-                     url = \"{DEFAULT_NIXPKGS_URL}\"; \
-                     sha256 = \"{DEFAULT_NIXPKGS_SHA256}\"; \
-                 }}) {{}}"
-            ),
-        };
-        let expr = format!("({nixpkgs_expr}).callPackage {runner_nix_path} {{}}");
-
-        // Build the runner and get its output path.
-        //
-        // `--impure` is required because the runner source lives in a temp dir
-        // outside the store: pure evaluation forbids reading it (and forbids
-        // `builtins.currentSystem`, needed by the default nixpkgs import). The
-        // runner *build* itself remains deterministic — only source-path
-        // resolution is impure — and the whole reccStdenv flow already runs
-        // under `--impure` for the same reason.
-        let out_output = std::process::Command::new("nix")
-            .args([
-                "build",
-                "--no-link",
-                "--print-out-paths",
-                "--impure",
-                "--extra-experimental-features",
-                "nix-command",
-                "--expr",
-                &expr,
-            ])
-            .env("NIX_REMOTE", format!("unix://{socket_path}"))
-            .output()
-            .map_err(|e| make_err!(Code::Internal, "Spawning `nix build` for the runner: {e}"))?;
-        let runner_out = check_nix_output(out_output, "nix build (runner)")?;
-
-        // Get the runner's .drv path.
-        let drv_output = std::process::Command::new("nix")
-            .args([
-                "path-info",
-                "--derivation",
-                "--extra-experimental-features",
-                "nix-command",
-                &runner_out,
-            ])
-            .env("NIX_REMOTE", format!("unix://{socket_path}"))
-            .output()
-            .map_err(|e| make_err!(Code::Internal, "Spawning `nix path-info` for the runner: {e}"))?;
-        let runner_drv = check_nix_output(drv_output, "nix path-info --derivation (runner)")?;
-
-        // Clean up the temp sources; ignore failures (they are harmless).
-        drop(std::fs::remove_dir_all(&tmp));
-
-        Self::from_paths(&runner_out, &runner_drv, None)
-    }
-}
-
-/// Interpret the output of a `nix` invocation: require success, then return the
-/// single trimmed line of stdout. Non-zero exit surfaces the captured stderr.
-fn check_nix_output(output: std::process::Output, what: &str) -> Result<String, Error> {
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(make_err!(
-            Code::Internal,
-            "{what} failed ({}): {}",
-            output.status,
-            stderr.trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let path = stdout.trim();
-    if path.is_empty() {
-        return Err(make_err!(Code::Internal, "{what} produced no output path"));
-    }
-    // `--print-out-paths` can print several lines if there are multiple
-    // outputs; the runner has a single `out`, so take the first line.
-    Ok(path.lines().next().unwrap_or(path).trim().to_string())
+/// Parse `NIXCEPTION_EXTRA_SANDBOX_PATHS`: colon-separated `/nix/store/…`
+/// paths. Empty segments (e.g. a trailing `:`) are ignored.
+fn parse_extra_sandbox_paths(value: &str) -> Result<Vec<StorePath<String>>, Error> {
+    value
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            StorePath::from_absolute_path(s.as_bytes()).map_err(|e| {
+                make_err!(
+                    Code::InvalidArgument,
+                    "Bad path in NIXCEPTION_EXTRA_SANDBOX_PATHS ({s}): {e}"
+                )
+            })
+        })
+        .collect()
 }
 
 /// Return the Nix system string for the current compilation target.
@@ -354,6 +237,7 @@ impl RunnerInfo {
             .expect("valid dummy store path"),
             hash_derivation_modulo: [0u8; 32],
             system: "x86_64-linux".into(),
+            extra_sandbox_paths: Vec::new(),
         }
     }
 }

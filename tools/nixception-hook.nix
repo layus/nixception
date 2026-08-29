@@ -5,14 +5,15 @@
 #
 #   nativeBuildInputs = [ nixceptionHook ];
 #
-# To inject extra tools into the runner sandbox (e.g. a custom compiler),
-# use withPackages, which is a thin convenience wrapper around .override:
-#
-#   nativeBuildInputs = [ (nixceptionHook.withPackages [ gppSleeper ]) ];
-#
-# That is equivalent to:
-#
-#   nativeBuildInputs = [ (nixceptionHook.override { extraRuntimeInputs = [ gppSleeper ]; }) ];
+# To make extra tools available inside the reapi-action sandbox (e.g. a
+# custom compiler), set NIXCEPTION_EXTRA_SANDBOX_PATHS (a colon-separated
+# list of /nix/store/… paths) in the build environment — see
+# nativelink-scheduler/src/runner_info.rs. This hook has no package-injection
+# API of its own, and no runner-related configuration at all: the nixception
+# binary has its runner's store paths baked in at compile time
+# (NIXCEPTION_RUNNER_OUT/_DRV, set by flake.nix's nixceptionFor), so the hook
+# only ever needs to start the binary — it doesn't know or care which runner
+# that is.
 #
 # The derivation is meant to be called from the top-level flake, e.g.:
 #
@@ -25,17 +26,9 @@
   wait4x,
   moreutils,
   makeSetupHook,
-  callPackage,
   runCommandLocal,
   shellcheck,
-  # Additional packages to place on PATH inside the nixception runner sandbox.
-  # These are forwarded to runner.nix, which lists them before the built-in
-  # defaults (coreutils, util-linux, bashNonInteractive) so they take
-  # precedence.
-  extraRuntimeInputs ? [],
 }: let
-  runner = callPackage ./runner/runner.nix {inherit extraRuntimeInputs;};
-
   hook = makeSetupHook {
     name = "nixception-hook";
 
@@ -83,12 +76,6 @@
       # they do not need to be propagated into the consumer's PATH.
       wait4x = "${wait4x}";
       moreutils = "${moreutils}";
-
-      # The runner is the tiny bash wrapper that nixception uses to execute
-      # each remote action.  Its output path and .drv path are both baked in
-      # so the hook can pass them to the nixception server at start-up.
-      runnerOut = "${runner}";
-      runnerDrv = "${runner.drvPath}";
     };
   }
   ./nixception-setup-hook.sh;

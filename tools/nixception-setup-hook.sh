@@ -41,18 +41,26 @@
 #
 # ── Runner ────────────────────────────────────────────────────────────────────
 #
-# The runner is built from the extraRuntimeInputs passed to nixceptionHook (or
-# nixceptionHook.withPackages) and its store paths are baked in at hook-install
-# time via @runnerOut@ / @runnerDrv@.  They are passed as inline variables
-# scoped to the nixception invocation and do not leak into the build environment.
+# The runner's store paths are baked into the nixception binary itself at
+# *compile* time (NIXCEPTION_RUNNER_OUT/_DRV, set by flake.nix's
+# nixceptionFor — see nativelink-scheduler/src/runner_info.rs). This hook has
+# no runner-related configuration at all: it just starts the binary, which
+# already knows which runner it was built against.
+#
+# ── Extra sandbox tools ──────────────────────────────────────────────────────
+#
+# To make extra tools available inside the reapi-action sandbox, export
+# NIXCEPTION_EXTRA_SANDBOX_PATHS (colon-separated /nix/store/… paths) in the
+# build environment *before* this phase runs — it is read directly by
+# nixception at start-up (see nativelink-scheduler/src/runner_info.rs), so it
+# needs no substitution here; being already exported, it is inherited by the
+# background nixception invocation below like any other ambient variable.
 #
 # ── @…@ substitutions filled in at hook-install time by substituteAll ────────
 #
 #   @nixception@  – store path of the nixception package
 #   @wait4x@      – store path of the wait4x package
 #   @moreutils@   – store path of the moreutils package (provides `ts`)
-#   @runnerOut@   – store path of the runner derivation output
-#   @runnerDrv@   – store path of the runner .drv file
 
 # shellcheck shell=bash
 
@@ -89,7 +97,6 @@ nixceptionStartPhase() {
     # ── Start the server ─────────────────────────────────────────────────────
     # All tools are invoked via their full store paths baked in at hook-install
     # time – none of them need to be on PATH.
-    # NIXCEPTION_RUNNER_* are scoped to this one invocation via inline assignment.
     #
     # In verbose mode the default RUST_LOG level is "info" and server output is
     # timestamped and forwarded to stderr.  In quiet mode the level drops to
@@ -104,18 +111,14 @@ nixceptionStartPhase() {
         _rust_log="warn"
     fi
 
-    _nixception_log "starting nixception server (runner: @runnerOut@)..."
+    _nixception_log "starting nixception server..."
     if [ "$_verbose" = "1" ]; then
-        NIXCEPTION_RUNNER_OUT="@runnerOut@" \
-            NIXCEPTION_RUNNER_DRV="@runnerDrv@" \
-            RUST_LOG="$_rust_log" \
+        RUST_LOG="$_rust_log" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > >(@moreutils@/bin/ts -s '[nixception] %H:%M:%.S' >&2) 2>&1 &
     else
-        NIXCEPTION_RUNNER_OUT="@runnerOut@" \
-            NIXCEPTION_RUNNER_DRV="@runnerDrv@" \
-            RUST_LOG="$_rust_log" \
+        RUST_LOG="$_rust_log" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > "$_logfile" 2>&1 &

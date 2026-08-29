@@ -88,8 +88,6 @@ down when the build exits:
 
 ```nix
 nativeBuildInputs = [ nixceptionHook ];
-# or, to inject tools into the runner sandbox:
-nativeBuildInputs = [ (nixceptionHook.withPackages [ myCompiler ]) ];
 ```
 
 The consuming derivation needs `requiredSystemFeatures = [ "recursive-nix" ]`.
@@ -100,6 +98,12 @@ Useful environment variables:
 - `NIXCEPTION_STATS_FILE` — where the server writes its timing summary.
 - `NIXCEPTION_LOG` — log level / filter (same syntax as `RUST_LOG`); honored
   if set.
+- `NIXCEPTION_EXTRA_SANDBOX_PATHS` — colon-separated `/nix/store/…` paths to
+  make available inside every reapi-action sandbox (e.g. a compiler
+  toolchain). The runner itself carries no toolset of its own, so any tool the
+  executed command needs — even a shell or `coreutils` — must come through
+  this or already be discoverable as a `/nix/store/…` reference in the
+  action's own command/environment/inputs.
 
 ## Relationship to NativeLink & licensing
 

@@ -24,8 +24,11 @@
 //!      `TEST_ROOT/store` (`local?root=…`), with an isolated daemon
 //!      (state/db/socket/conf all under `TEST_ROOT`, `sandbox = false`).
 //!   2. Launches a standalone `nixception` pointed at that daemon via
-//!      `NIX_REMOTE=unix://…` and `NIXCEPTION_STORE_ROOT=TEST_ROOT/store`, with
-//!      the pre-built runner (`NIXCEPTION_RUNNER_OUT`/`_DRV`).
+//!      `NIX_REMOTE=unix://…` and `NIXCEPTION_STORE_ROOT=TEST_ROOT/store`. The
+//!      runner it uses is fixed at compile time (baked into the binary under
+//!      test), so its closure is copied into the chroot store instead of
+//!      being passed as an env var; the compiler toolchain is supplied via
+//!      `NIXCEPTION_EXTRA_SANDBOX_PATHS`.
 //!   3. Drives `recc <compiler> …` against `127.0.0.1:50051` and asserts on the
 //!      chroot store contents.
 //!
@@ -53,6 +56,11 @@ const FIXTURE_NIXCEPTION: &str = "NIXCEPTION_FIXTURE_NIXCEPTION";
 /// includes the compiler in the reapi-action sandbox — a symlink outside the
 /// store would leave the compiler missing inside the runner sandbox.
 const FIXTURE_GCC: &str = "NIXCEPTION_FIXTURE_GCC";
+/// Env var holding the colon-separated toolset (gcc/binutils/coreutils) to
+/// forward as `NIXCEPTION_EXTRA_SANDBOX_PATHS` to the server under test —
+/// the runner itself has no built-in toolset, so every reapi-action sandbox
+/// needs this to have a shell/linker/etc. available.
+const FIXTURE_EXTRA_SANDBOX_PATHS: &str = "NIXCEPTION_FIXTURE_EXTRA_SANDBOX_PATHS";
 
 /// Skip (with a printed note) unless the fixture env is present.
 macro_rules! require_fixture {
@@ -76,6 +84,7 @@ struct Fixture {
     runner_drv: String,
     nixception: PathBuf,
     gcc: String,
+    extra_sandbox_paths: String,
 }
 
 impl Fixture {
@@ -86,6 +95,7 @@ impl Fixture {
             runner_drv: std::env::var(FIXTURE_RUNNER_DRV).ok()?,
             nixception: PathBuf::from(std::env::var(FIXTURE_NIXCEPTION).ok()?),
             gcc: std::env::var(FIXTURE_GCC).ok()?,
+            extra_sandbox_paths: std::env::var(FIXTURE_EXTRA_SANDBOX_PATHS).ok()?,
         })
     }
 
@@ -155,13 +165,23 @@ impl TestEnv {
             .success();
         assert!(ok, "nix-store --init failed");
 
-        // Copy the runner's closure (out + drv) from the real store into the
-        // chroot store.  The reapi-action derivations list the runner as an
-        // input derivation, so it must be present in the test store for the
-        // daemon to build an action.  The copy reads via the real system daemon
-        // (`--from daemon`) — it must NOT inherit the isolated NIX_STATE_DIR,
-        // which points at the empty chroot db.
-        for src in [&fixture.runner_out, &fixture.runner_drv] {
+        // Copy the runner's closure (out + drv), plus the extra-sandbox-paths
+        // toolset (gcc/binutils/coreutils), from the real store into the
+        // chroot store.  The reapi-action derivations reference all of these,
+        // so they must be present in the test store for the daemon to build
+        // an action.  The copy reads via the real system daemon (`--from
+        // daemon`) — it must NOT inherit the isolated NIX_STATE_DIR, which
+        // points at the empty chroot db.
+        let extra_sandbox_path_list: Vec<&str> = fixture
+            .extra_sandbox_paths
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .collect();
+        for src in [&fixture.runner_out, &fixture.runner_drv]
+            .into_iter()
+            .map(String::as_str)
+            .chain(extra_sandbox_path_list.iter().copied())
+        {
             let ok = Command::new(fixture.tool("nix"))
                 .env("HOME", &home)
                 .args([
@@ -201,10 +221,16 @@ impl TestEnv {
 
         // Launch the standalone nixception server against the test daemon.
         let mut scmd = Command::new(&fixture.nixception);
+        // NIXCEPTION_RUNNER_OUT/_DRV are compile-time constants baked into
+        // the binary (see runner_info.rs) — not set here. fixture.runner_out
+        // /_drv are still used above, to copy the runner's closure into the
+        // chroot store the daemon serves.
         scmd.env("NIX_REMOTE", format!("unix://{}", socket.display()))
             .env("NIXCEPTION_STORE_ROOT", &store)
-            .env("NIXCEPTION_RUNNER_OUT", &fixture.runner_out)
-            .env("NIXCEPTION_RUNNER_DRV", &fixture.runner_drv)
+            .env(
+                "NIXCEPTION_EXTRA_SANDBOX_PATHS",
+                &fixture.extra_sandbox_paths,
+            )
             .env(
                 "NIXCEPTION_LOG",
                 std::env::var("NIXCEPTION_E2E_LOG").unwrap_or_else(|_| "warn".into()),

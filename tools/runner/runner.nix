@@ -8,45 +8,21 @@
 #
 # A standalone tools/runner/Makefile also exists for building runner.cpp
 # outside Nix (e.g. `make -C tools/runner` while hacking on it), but this
-# derivation does not use it — it compiles directly so the embedded self-build
-# path in nativelink-scheduler/src/runner_info.rs (which bundles this file and
-# runner.cpp via include_str!) has no external Makefile dependency. Other
-# consumers who want a make-based build write their own .nix file around the
-# Makefile.
+# derivation does not use it — it compiles directly so it has no external
+# Makefile dependency.
 #
-# The derivation produces:
-#
-#   $out/bin/runner      – the C++ binary (used as the derivation builder)
-#   $out/nix-support/sandbox-inputs
-#                        – a file whose content references every runtimeInput
-#                          store path, ensuring they remain in the runner's
-#                          closure.  The Nix sandbox for reapi-action
-#                          derivations (which use the runner as their builder)
-#                          therefore includes these paths, making the tools
-#                          available to executed commands.
-#
-# extraRuntimeInputs is placed first so caller-supplied tools shadow the
-# built-in defaults (coreutils, util-linux, bashNonInteractive).
+# The runner itself never shells out to any external tool (it execvpe()s the
+# command from the manifest directly), so this derivation carries no runtime
+# toolset opinion — the sandbox for the *executed command* gets whatever the
+# nixception server is configured with via NIXCEPTION_EXTRA_SANDBOX_PATHS, not
+# anything baked in here.
 #
 # This file is called from flake.nix via `pkgs.callPackage ./tools/runner/runner.nix`.
 {
   stdenv,
   nlohmann_json,
   lib,
-  coreutils,
-  util-linux,
-  tree,
-  bashNonInteractive,
-  # Additional packages whose store paths must be available inside the Nix
-  # sandbox when the runner executes an action.  These are listed first so
-  # they take precedence over the built-in defaults.
-  extraRuntimeInputs ? [],
-}: let
-  # All packages that should be reachable in the reapi-action sandbox.
-  # The runner binary itself does not invoke them — they are for the
-  # command being executed (e.g. a compiler wrapper).
-  sandboxInputs = extraRuntimeInputs ++ [coreutils util-linux bashNonInteractive tree];
-in
+}:
   stdenv.mkDerivation {
     name = "runner";
     src = ./runner.cpp;
@@ -68,15 +44,8 @@ in
 
     installPhase = ''
       runHook preInstall
-      mkdir -p $out/bin $out/nix-support
+      mkdir -p $out/bin
       cp runner $out/bin/runner
-
-      # Reference every sandbox-input store path so the Nix scanner keeps
-      # them in the runner's closure.  Without this the sandbox for
-      # reapi-action derivations (which declare the runner as an input
-      # derivation) would not contain these tools.
-      echo "${lib.concatMapStringsSep " " toString sandboxInputs}" \
-        > $out/nix-support/sandbox-inputs
       runHook postInstall
     '';
 
