@@ -170,14 +170,6 @@
         cargoArtifactsFor = p: (craneLibFor p).buildDepsOnly (commonArgsFor p);
         nightlyCargoArtifactsFor = p: (craneLibFor p).buildDepsOnly (commonArgsFor p);
 
-        nativelinkFor = p:
-          (craneLibFor p).buildPackage (
-            (commonArgsFor p)
-            // {
-              cargoArtifacts = cargoArtifactsFor p;
-            }
-          );
-
         # The runner is built once per host platform (it never needs to be
         # cross-compiled the way the server itself does): a plain
         # pkgs.callPackage build of tools/runner/runner.nix.  Only nixception
@@ -204,6 +196,16 @@
           // {
             passthru.runner = runner;
           };
+
+        # `nativelink` is the pre-single-binary name for this same output:
+        # Cargo.toml now declares only the `nixception` [[bin]] (192fa2cf), so
+        # nativelinkFor without `--bin nixception` already built the identical
+        # binary — just without the runner env vars nixceptionFor now sets,
+        # which broke it. Reuse nixceptionFor's build directly instead of
+        # compiling it twice under two names.
+        # TODO: fold the `nativelink`-named outputs below into their
+        # `nixception` equivalents and drop this alias.
+        nativelinkFor = nixceptionFor;
 
         # nixceptionHookFor builds the setup hook for a given nixception binary.
         # The hook starts a nixception server before the build phase and stops
