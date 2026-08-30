@@ -215,6 +215,17 @@
         nixception = nixceptionFor nativeTargetPkgs;
         nixceptionHook = nixceptionHookFor nativeTargetPkgs;
 
+        # The integration suite (checks/overlay.nix), applied against this
+        # flake's own `pkgs` with the local-source nixceptionHook above (not
+        # one fetched from nixpkgs) — `final`/`_prev` are both `pkgs` since the
+        # overlay never actually reads `_prev`.  Its own output is
+        # `{ nixceptionChecks = <the per-test attrset>; }`; unwrap that one key.
+        nixceptionChecks =
+          ((import ./checks/overlay.nix {inherit nixceptionHook;})
+            pkgs
+            pkgs)
+          .nixceptionChecks;
+
         # Fixture for the standalone (outside-sandbox) integration tests in
         # nativelink-scheduler/tests/standalone_recc.rs: a directory of symlinks
         # to every tool the Rust harness needs, plus the pre-built runner (out +
@@ -324,15 +335,14 @@
             }
             else {}
           );
-        checks = {
-          # The recc / reccStdenv integration checks live in the nixpkgs
-          # `nixception` fork (reccStdenv.tests.*, recc.passthru.tests.*,
-          # nixceptionHook.passthru.tests.*), built against the fork's real
-          # reccStdenv.  This repo's own coverage of the end-to-end path is the
-          # standalone (outside-sandbox) test — see standalone-test-fixture and
-          # nativelink-scheduler/tests/standalone_recc.rs — which is driven by
-          # cargo, not `nix flake check`.
-        };
+        # The recc/reccStdenv/Bazel integration checks (checks/overlay.nix),
+        # built against this repo's own local-source nixception/nixceptionHook.
+        # Run them all with `nix flake check`, or one at a time with
+        # `nix build .#checks.<system>.<name>`.  This repo's coverage of the
+        # standalone (outside-sandbox) path is separate — see
+        # standalone-test-fixture and nativelink-scheduler/tests/standalone_recc.rs,
+        # which is driven by cargo, not `nix flake check`.
+        checks = nixceptionChecks;
         pre-commit.settings = {
           hooks = import ./tools/pre-commit-hooks.nix {
             inherit pkgs;
