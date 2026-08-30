@@ -5,6 +5,48 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.5.0] - 2026-08-30
+
+### Changed
+
+- **The crate is now named `nixception`, not `nativelink`.** `Cargo.toml`'s
+  `[package] name` matches the fork's only binary; the redundant `[[bin]]`
+  section (and the upstream `nativelink` output it shadowed) are gone.
+  `flake.nix`'s `packages.default`/`apps.default` build and run this binary
+  directly — no more separate, silently-uncompilable `nativelink`-named alias.
+- **The runner's identity is fixed at compile time, not passed at runtime.**
+  `NIXCEPTION_RUNNER_OUT`/`NIXCEPTION_RUNNER_DRV` are now `env!()` constants
+  baked into the binary by packaging (the nixpkgs `nixception` package builds
+  the runner first, then sets these via `env.*`; this repo's own `flake.nix`
+  does the same). There is no runtime way to point a built binary at a
+  different runner, and no self-build fallback anymore (the old
+  `RunnerInfo::build_with_nix`, which reconstructed the runner via `nix build`
+  at server start-up, was untested dead code removed along with it — nothing
+  ever exercised it, since the setup hook always supplied pre-built paths).
+- **Extra sandbox tools go through `NIXCEPTION_EXTRA_SANDBOX_PATHS`.** A new,
+  optional runtime env var (colon-separated `/nix/store/…` paths) makes
+  packages available inside every REAPI action's runner sandbox. This replaces
+  `nixceptionHook.withPackages`/`.override { extraRuntimeInputs = …; }`, which
+  used to bake a custom package set into a dedicated runner build per caller;
+  the runner itself carries no toolset opinion now — it never shells out to
+  anything on its own.
+- The integration checks (`recc-smoke-test`, `recc-hello`, `recc-spdlog`,
+  `recc-nix`, `bazel-rules-nixpkgs-hello`, `bazel-abseil-cpp`,
+  `protoc-gen-js-with-nixception`) now live in this repo, under `checks/`, and
+  build against this repo's own local source (`nix flake check`, or
+  `nix build .#checks.<system>.<name>` for one) instead of a nixpkgs release.
+
+### Fixed
+
+- **Actions that execute a tool built by an earlier remote action failed with
+  `Permission denied`.** The runner's CAS-materialized inputs lost their
+  executable bit — a fix for this landed in 0.4.0-era development
+  (`625b1e7c`) but was silently reverted by a later "sync tools/runner.cpp up
+  to the nixpkgs-fork version" commit, since that nixpkgs copy had never
+  received the fix either. Restored; verified against
+  `protoc-gen-js-with-nixception`, which needs its own remotely-built `protoc`
+  to run a later action and was the check that failure broke.
+
 ## [0.4.0] - 2026-07-21
 
 ### Added
