@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 edition = "2024"
-name = "nativelink"
+name = "nixception"
 rust-version = "1.87.0"
 version = "0.4.0"
 
@@ -18,9 +18,6 @@ debug = false
 inherits = "dev"
 opt-level = "z"
 strip = true
-
-[[bin]]
-name = "nixception"
 
 [features]
 nix = ["nativelink-worker/nix"]

@@ -1,5 +1,5 @@
 {
-  description = "nativelink";
+  description = "nixception";
   # NOTE: This flake uses git submodules (vendor/). `inputs.self.submodules`
   # makes plain `nix build` include them; on Nix < 2.27 build with:
   #   nix build ".?submodules=1#<target>"
@@ -91,7 +91,6 @@
         ...
       }: let
         craneLibFor = p: (crane.mkLib p).overrideToolchain pkgs.lre.stableRustFor;
-        nightlyCraneLibFor = p: (crane.mkLib p).overrideToolchain pkgs.lre.nightlyRustFor;
 
         src = pkgs.lib.cleanSourceWith {
           src = (craneLibFor pkgs).path ./.;
@@ -168,7 +167,6 @@
 
         # Additional target for external dependencies to simplify caching.
         cargoArtifactsFor = p: (craneLibFor p).buildDepsOnly (commonArgsFor p);
-        nightlyCargoArtifactsFor = p: (craneLibFor p).buildDepsOnly (commonArgsFor p);
 
         # The runner is built once per host platform (it never needs to be
         # cross-compiled the way the server itself does): a plain
@@ -197,16 +195,6 @@
             passthru.runner = runner;
           };
 
-        # `nativelink` is the pre-single-binary name for this same output:
-        # Cargo.toml now declares only the `nixception` [[bin]] (192fa2cf), so
-        # nativelinkFor without `--bin nixception` already built the identical
-        # binary — just without the runner env vars nixceptionFor now sets,
-        # which broke it. Reuse nixceptionFor's build directly instead of
-        # compiling it twice under two names.
-        # TODO: fold the `nativelink`-named outputs below into their
-        # `nixception` equivalents and drop this alias.
-        nativelinkFor = nixceptionFor;
-
         # nixceptionHookFor builds the setup hook for a given nixception binary.
         # The hook starts a nixception server before the build phase and stops
         # it afterwards, wiring in the runner nixception itself owns (built
@@ -224,7 +212,6 @@
           then pkgs.pkgsCross.aarch64-multiplatform-musl
           else pkgs;
 
-        nativelink = nativelinkFor nativeTargetPkgs;
         nixception = nixceptionFor nativeTargetPkgs;
         nixceptionHook = nixceptionHookFor nativeTargetPkgs;
 
@@ -277,158 +264,17 @@
 
         # These two can be built by all build platforms. This is not true for
         # darwin targets which are only buildable via native compilation.
-        nativelink-aarch64-linux = nativelinkFor pkgs.pkgsCross.aarch64-multiplatform-musl;
-        nativelink-x86_64-linux = nativelinkFor pkgs.pkgsCross.musl64;
-
-        nativelink-is-executable-test = pkgs.callPackage ./tools/nativelink-is-executable-test.nix {
-          inherit nativelink;
-        };
+        nixception-aarch64-linux = nixceptionFor pkgs.pkgsCross.aarch64-multiplatform-musl;
+        nixception-x86_64-linux = nixceptionFor pkgs.pkgsCross.musl64;
 
         generate-toolchains = pkgs.callPackage ./tools/generate-toolchains.nix {};
 
         build-chromium-tests = pkgs.writeShellScriptBin "build-chromium-tests" ./deploy/chromium-example/build_chromium_tests.sh;
 
         docs = pkgs.callPackage ./tools/docs.nix {rust = pkgs.lre.stable-rust;};
-
-        inherit (nix2container.packages.${system}.nix2container) pullImage;
-        inherit (nix2container.packages.${system}.nix2container) buildImage;
-
-        # TODO(palfrey): Allow "crosscompiling" this image. At the moment
-        #                    this would set a wrong container architecture. See:
-        #                    https://github.com/nlewo/nix2container/issues/138.
-        nativelink-image = let
-          nativelinkForImage =
-            if pkgs.stdenv.isx86_64
-            then nativelink-x86_64-linux
-            else nativelink-aarch64-linux;
-        in
-          buildImage {
-            name = "nativelink";
-            copyToRoot = [
-              (pkgs.buildEnv {
-                name = "nativelink-buildEnv";
-                paths = [nativelinkForImage];
-                pathsToLink = ["/bin"];
-              })
-            ];
-            config = {
-              Entrypoint = [(pkgs.lib.getExe' nativelinkForImage "nativelink")];
-              Labels = {
-                "org.opencontainers.image.description" = "An RBE compatible, high-performance cache and remote executor.";
-                "org.opencontainers.image.documentation" = "https://github.com/TraceMachina/nativelink";
-                "org.opencontainers.image.licenses" = "FSL-1.1-Apache-2.0";
-                "org.opencontainers.image.revision" = "${self.rev or self.dirtyRev or "dirty"}";
-                "org.opencontainers.image.source" = "https://github.com/TraceMachina/nativelink";
-                "org.opencontainers.image.title" = "NativeLink";
-                "org.opencontainers.image.vendor" = "Trace Machina, Inc.";
-              };
-            };
-          };
-
-        nativelink-worker-init = pkgs.callPackage ./tools/nativelink-worker-init.nix {
-          inherit buildImage self nativelink-image;
-        };
-
-        createWorker = pkgs.nativelink-tools.lib.createWorker self;
-
-        buck2-toolchain = let
-          buck2-nightly-rust-version = "2025-04-08";
-          buck2-nightly-rust = pkgs.rust-bin.nightly.${buck2-nightly-rust-version};
-          buck2-rust = buck2-nightly-rust.default.override {extensions = ["rust-src"];};
-        in
-          pkgs.callPackage ./tools/create-worker-experimental.nix {
-            inherit buildImage self;
-            imageName = "buck2-toolchain";
-            packagesForImage = [
-              pkgs.coreutils
-              pkgs.bash
-              pkgs.go
-              pkgs.diffutils
-              pkgs.gnutar
-              pkgs.gzip
-              pkgs.python3Full
-              pkgs.unzip
-              pkgs.zstd
-              pkgs.cargo-bloat
-              pkgs.mold-wrapped
-              pkgs.reindeer
-              pkgs.lld_16
-              pkgs.clang_16
-              buck2-rust
-            ];
-          };
-        siso-chromium = buildImage {
-          name = "siso-chromium";
-          fromImage = pullImage {
-            imageName = "gcr.io/chops-public-images-prod/rbe/siso-chromium/linux";
-            imageDigest = "sha256:26de99218a1a8b527d4840490bcbf1690ee0b55c84316300b60776e6b3a03fe1";
-            sha256 = "sha256-v2wctuZStb6eexcmJdkxKcGHjRk2LuZwyJvi/BerMyw=";
-            tlsVerify = true;
-            arch = "amd64";
-            os = "linux";
-          };
-        };
-        toolchain-drake = buildImage {
-          name = "toolchain-drake";
-          # imageDigest and sha256 are generated by toolchain-drake.sh for non-reproducible builds.
-          fromImage = pullImage {
-            imageName = "localhost:5001/toolchain-drake";
-            imageDigest = ""; # DO NOT COMMIT DRAKE IMAGE_DIGEST VALUE
-            sha256 = ""; # DO NOT COMMIT DRAKE SHA256 VALUE
-            tlsVerify = false;
-            arch = "amd64";
-            os = "linux";
-          };
-        };
-        toolchain-buck2 = buildImage {
-          name = "toolchain-buck2";
-          # imageDigest and sha256 are generated by toolchain-buck2.sh for non-reproducible builds.
-          fromImage = pullImage {
-            imageName = "localhost:5001/toolchain-buck2";
-            imageDigest = ""; # DO NOT COMMIT BUCK2 IMAGE_DIGEST VALUE
-            sha256 = ""; # DO NOT COMMIT BUCK2 SHA256 VALUE
-            tlsVerify = false;
-            arch = "amd64";
-            os = "linux";
-          };
-        };
-
-        nativelinkCoverageFor = p: let
-          coverageArgs =
-            (commonArgsFor p)
-            // {
-              # TODO(palfrey): For some reason we're triggering an edgecase where
-              #                    mimalloc builds against glibc headers in coverage
-              #                    builds. This leads to nonexistend __memcpy_chk and
-              #                    __memset_chk symbols if fortification is enabled.
-              #                    Our regular builds also have this issue, but we
-              #                    should investigate further.
-              hardeningDisable = ["fortify"];
-            };
-        in
-          (nightlyCraneLibFor p).cargoLlvmCov (
-            coverageArgs
-            // {
-              cargoArtifacts = nightlyCargoArtifactsFor p;
-              cargoExtraArgs = builtins.concatStringsSep " " [
-                "--all"
-                "--locked"
-                "--features nix"
-                "--branch"
-                "--ignore-filename-regex '.*(genproto|vendor-cargo-deps|crates).*'"
-              ];
-              cargoLlvmCovExtraArgs = "--html --output-dir $out";
-            }
-          );
-
-        nativelinkCoverageForHost = nativelinkCoverageFor pkgs;
       in rec {
         _module.args.pkgs = import self.inputs.nixpkgs {
           inherit system;
-          config.allowUnfreePredicate = pkg:
-            builtins.elem (lib.getName pkg) [
-              "mongodb"
-            ];
           overlays = [
             self.overlays.lre
             self.overlays.tools
@@ -439,7 +285,7 @@
         apps = {
           default = {
             type = "app";
-            program = "${nativelink}/bin/nativelink";
+            program = "${nixception}/bin/nixception";
           };
           native = {
             type = "app";
@@ -449,66 +295,16 @@
         packages =
           rec {
             inherit
-              nativelink
               nixception
               nixceptionHook
               standalone-test-fixture
-              nativelinkCoverageForHost
-              nativelink-aarch64-linux
-              nativelink-image
-              nativelink-is-executable-test
-              nativelink-worker-init
-              nativelink-x86_64-linux
+              nixception-aarch64-linux
+              nixception-x86_64-linux
               ;
 
-            # Used by the CI
-            inherit (pkgs.nativelink-tools) local-image-test publish-ghcr;
+            default = nixception;
 
-            default = nativelink;
-
-            nativelink-worker-lre-cc = createWorker pkgs.lre.lre-cc.image;
-            lre-java = pkgs.callPackage ./local-remote-execution/lre-java.nix {inherit buildImage;};
-            rbe-autogen-lre-java = pkgs.rbe-autogen lre-java;
-            nativelink-worker-lre-java = createWorker lre-java;
-            nativelink-worker-lre-rs = createWorker pkgs.lre.lre-rs.image;
-            nativelink-worker-siso-chromium = createWorker siso-chromium;
-            nativelink-worker-toolchain-drake = createWorker toolchain-drake;
-            nativelink-worker-toolchain-buck2 = createWorker toolchain-buck2;
-            nativelink-worker-buck2-toolchain = buck2-toolchain;
-            image = nativelink-image;
-
-            inherit
-              (pkgs)
-              buildstream
-              buildbox
-              buck2
-              mongodb
-              wait4x
-              bazelisk
-              ;
-            buildstream-with-nativelink-test =
-              pkgs.callPackage integration_tests/buildstream/buildstream-with-nativelink-test.nix
-              {
-                inherit nativelink buildstream buildbox;
-              };
-            mongo-with-nativelink-test =
-              pkgs.callPackage integration_tests/mongo/mongo-with-nativelink-test.nix
-              {
-                inherit
-                  nativelink
-                  mongodb
-                  wait4x
-                  bazelisk
-                  ;
-              };
-            rbe-toolchain-with-nativelink-test = pkgs.callPackage toolchain-examples/rbe-toolchain-test.nix {
-              inherit nativelink bazelisk;
-            };
-            buck2-with-nativelink-test =
-              pkgs.callPackage integration_tests/buck2/buck2-with-nativelink-test.nix
-              {
-                inherit nativelink buck2;
-              };
+            inherit (pkgs) buildbox bazelisk;
 
             generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
               craneLib = craneLibFor pkgs;
@@ -520,11 +316,11 @@
             # To keep them uniform with the linux targets if they're buildable.
             if pkgs.stdenv.system == "aarch64-darwin"
             then {
-              nativelink-aarch64-darwin = nativelink;
+              nixception-aarch64-darwin = nixception;
             }
             else if pkgs.stdenv.system == "x86_64-darwin"
             then {
-              nativelink-x86_64-darwin = nativelink;
+              nixception-x86_64-darwin = nixception;
             }
             else {}
           );
