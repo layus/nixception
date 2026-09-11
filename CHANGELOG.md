@@ -5,6 +5,32 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.6.0] - 2026-09-12
+
+### Fixed
+
+- **Discovered store paths are always added as `input_sources`, never
+  resolved to a deriver.** Building an action's derivation used to query the
+  Nix daemon for each discovered `/nix/store/…` path's deriver, and — when
+  one was found — reference that deriver (as an `input_derivation`, with a
+  computed `hash_derivation_modulo`) instead of the path itself. That
+  precision was unreliable rather than merely unavailable: inside a
+  `recursive-nix` sandboxed build (every real `nix build` action nixception
+  prepares), the daemon it talks to is Nix's own `RestrictedStore`, which
+  unconditionally strips the `deriver` field from every `queryPathInfo` reply
+  as impure information — so a real build's actions always resolved every
+  path as a plain source. Anything resolved from outside that sandbox (e.g.
+  `nix develop`, which talks to the host daemon directly and does see real
+  deriver info) could instead resolve some of those very same store paths to
+  `input_derivations`, producing a derivation with a different structural
+  shape — and hash — for what was otherwise a byte-identical action, so the
+  cache never crossed the `nix build` / `nix develop` boundary for actions
+  that referenced any such path (e.g. through `$PATH`). Every discovered path
+  is now classified as an input source unconditionally: less precise (Nix can
+  no longer distinguish "this exact build of gcc" from "any content-identical
+  path already named `/nix/store/<hash>-gcc-...`"), but deterministic from
+  any calling context, with no daemon round-trip involved.
+
 ## [0.5.0] - 2026-08-30
 
 ### Changed

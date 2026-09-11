@@ -72,7 +72,7 @@ use nix_compat::nixhash::CAHash;
 use nix_compat::store_path::{STORE_DIR_WITH_SLASH, StorePath};
 
 use crate::nix_stats::{NixceptionStats, TimingGuard};
-use crate::runner_info::{RunnerInfo, compute_hash_derivation_modulo, physical_store_path};
+use crate::runner_info::{RunnerInfo, physical_store_path};
 
 use bstr::BString;
 use bytes::Bytes;
@@ -141,20 +141,6 @@ impl RunnerTiming {
 /// spend setting up the Nix build sandbox before the runner starts.  Added to
 /// the runner's reported runtime when estimating the cost a cache hit avoided.
 const SANDBOX_SETUP_FLOOR: Duration = Duration::from_millis(300);
-
-/// Information about a store path's deriver, resolved via the Nix daemon.
-///
-/// The corresponding `hash_derivation_modulo` is not stored here — it
-/// lives in the shared `hash_cache` (`HashMap<String, [u8; 32]>`) that
-/// is passed through [`NixWorker::resolve_discovered_store_paths`] and
-/// later read by the [`Derivation::hash_derivation_modulo`] closure.
-#[derive(Clone, Debug)]
-struct ResolvedInputDrv {
-    /// The `.drv` store path of the deriver.
-    drv_store_path: StorePath<String>,
-    /// Which output of the deriver produces the discovered store path.
-    output_name: String,
-}
 
 /// Scan a byte slice for all `/nix/store/<hash>-<name>` references and
 /// return them as a deduplicated set of [`StorePath`]s.
@@ -228,10 +214,15 @@ pub(crate) type ScanCache = Arc<RwLock<HashMap<String, BTreeSet<StorePath<String
 
 /// Cached result of resolving a discovered store path via the Nix daemon.
 ///
-/// `None` means the path was queried but has no deriver (source-only path)
-/// or the daemon returned no info.  `Some(…)` contains the resolved
-/// derivation and its hash_derivation_modulo.
+/// Currently unconstructed: [`NixWorker::resolve_discovered_store_paths`] no
+/// longer queries the daemon for deriver info at all (see its doc comment —
+/// the daemon a real sandboxed build talks to always reports no deriver, so
+/// resolving it when a *different* caller's daemon happens to know one made
+/// otherwise-identical actions hash differently). Kept, still threaded
+/// through [`NixWorker`] and `NixScheduler`, in case path-info caching is
+/// reintroduced for something else later.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) enum PathInfoCacheEntry {
     /// Path is valid but has no deriver — should be added as input source.
     Source,
@@ -248,6 +239,8 @@ pub(crate) enum PathInfoCacheEntry {
 /// A concurrent cache mapping store path strings to their resolved
 /// path-info results.  Shared across all [`NixWorker`] instances to
 /// avoid redundant `query_path_info` + `.drv` read operations.
+///
+/// See [`PathInfoCacheEntry`]: currently unused for the same reason.
 pub(crate) type PathInfoCache = Arc<RwLock<HashMap<String, PathInfoCacheEntry>>>;
 
 /// RAII guard tracking a single live action in the shared in-flight
@@ -297,6 +290,11 @@ pub(crate) struct NixWorker {
     scan_cache: ScanCache,
     /// Shared cache of resolved path-info results, avoiding redundant
     /// `query_path_info` daemon calls across actions.
+    ///
+    /// Currently unused — see [`PathInfoCacheEntry`]. Still threaded through
+    /// from `NixScheduler` so it's ready if path-info caching is
+    /// reintroduced for something else.
+    #[allow(dead_code)]
     path_info_cache: PathInfoCache,
 }
 
@@ -823,249 +821,44 @@ impl NixWorker {
     // ----- derivation helpers -----
 
     /// Given a set of discovered store paths (from command args, env vars,
-    /// etc.), query the Nix daemon for each one to find its deriver, read
-    /// the `.drv` to determine which output name produces that path, and
-    /// compute the `hash_derivation_modulo`.
+    /// etc.), classify each as an action input source.
     ///
-    /// Returns a vec of [`ResolvedInputDrv`] entries (one per unique
-    /// deriver) ready to be added to the action derivation's
-    /// `input_derivations`.
+    /// This used to query the Nix daemon for each path's deriver and, when
+    /// one was found, add the *deriver* (as an `input_derivation`, with a
+    /// computed `hash_derivation_modulo`) instead of the path itself — a
+    /// more precise, input-addressed reference. That precision turned out to
+    /// be unreliable rather than merely unavailable: inside a `recursive-nix`
+    /// sandboxed build (i.e. every real `nix build` action nixception
+    /// prepares), the daemon it talks to is Nix's own `RestrictedStore`,
+    /// which *unconditionally* strips the `deriver` field from every
+    /// `queryPathInfo` reply as "impure information"
+    /// (`src/libstore/restricted-store.cc`, `queryPathInfoUncached`) — so a
+    /// real build's actions always fell into the "no deriver, use as
+    /// input_source" branch. Anything resolved from *outside* that sandbox
+    /// (e.g. `nix develop`, which talks to the host daemon directly and does
+    /// see real deriver info) could instead resolve some of the very same
+    /// store paths to `input_derivations` — producing a derivation with a
+    /// different structural shape (and hash) for what is otherwise a
+    /// byte-identical action, defeating the whole point of caching across
+    /// that boundary.
     ///
-    /// Store paths that have no deriver (e.g. source-only paths or
-    /// bootstrap tarballs) are returned separately so the caller can add
-    /// them to `input_sources` instead.
-    async fn resolve_discovered_store_paths(
-        &self,
+    /// Every discovered path is now added directly as an input source,
+    /// unconditionally. This is less precise than resolving to a deriver
+    /// when one happens to be available — Nix can no longer distinguish
+    /// "this exact build of gcc" from "any content-identical path already
+    /// named /nix/store/<hash>-gcc-..." — but it is deterministic: the same
+    /// scan of the same command/environment always classifies every path
+    /// the same way, from any calling context, with no daemon round-trip
+    /// (and its host-dependent answer) involved at all.
+    fn resolve_discovered_store_paths(
         discovered: &BTreeSet<StorePath<String>>,
         already_known_sources: &BTreeSet<StorePath<String>>,
-        hash_cache: &mut HashMap<String, [u8; 32]>,
-    ) -> Result<(Vec<ResolvedInputDrv>, Vec<StorePath<String>>), Error> {
-        let mut resolved_drvs: Vec<ResolvedInputDrv> = Vec::new();
-        let mut extra_sources: Vec<StorePath<String>> = Vec::new();
-
-        // Deduplicate by (deriver, output name) so that a multi-output
-        // derivation referenced through several of its outputs (e.g. a
-        // package's `out` via NIX_LDFLAGS and its `dev` via an `-I` flag)
-        // contributes *all* of those outputs, while we still avoid pushing
-        // the same (deriver, output) pair twice.  Deduplicating by deriver
-        // alone would drop every output but the first one encountered.
-        let mut seen_outputs: BTreeSet<(String, String)> = BTreeSet::new();
-
-        for sp in discovered {
-            // Skip paths that are already in input_sources (CAS entries).
-            if already_known_sources.contains(sp) {
-                continue;
-            }
-
-            let abs_path = sp.to_absolute_path();
-
-            // ── Check the shared path-info cache first ───────────────
-            if let Some(cached) = self.path_info_cache.read().get(&abs_path) {
-                self.stats.increment(&self.stats.path_info_cache_hits);
-                match cached {
-                    PathInfoCacheEntry::Source => {
-                        extra_sources.push(sp.clone());
-                    }
-                    PathInfoCacheEntry::Resolved {
-                        drv_store_path,
-                        output_name,
-                        hash_derivation_modulo,
-                    } => {
-                        let drv_abs = drv_store_path.to_absolute_path();
-                        if seen_outputs.insert((drv_abs.clone(), output_name.clone())) {
-                            hash_cache.insert(drv_abs, *hash_derivation_modulo);
-                            resolved_drvs.push(ResolvedInputDrv {
-                                drv_store_path: drv_store_path.clone(),
-                                output_name: output_name.clone(),
-                            });
-                        }
-                    }
-                    PathInfoCacheEntry::NotFound => {}
-                }
-                continue;
-            }
-
-            // ── Cache miss — query the Nix daemon ────────────────────
-            self.stats.increment(&self.stats.path_info_cache_misses);
-            self.stats.increment(&self.stats.query_path_info_count);
-            let path_info = match self.connection.query_path_info(&abs_path).await {
-                Ok(Some(info)) => info,
-                Ok(None) => {
-                    event!(
-                        Level::WARN,
-                        store_path = %abs_path,
-                        "Discovered store path is not valid in the store, skipping"
-                    );
-                    self.path_info_cache
-                        .write()
-                        .insert(abs_path, PathInfoCacheEntry::NotFound);
-                    continue;
-                }
-                Err(e) => {
-                    event!(
-                        Level::WARN,
-                        store_path = %abs_path,
-                        error = ?e,
-                        "Failed to query path info for discovered store path, skipping"
-                    );
-                    // Don't cache errors — they may be transient.
-                    continue;
-                }
-            };
-
-            // The deriver field is an OptionalStorePath (a NixString that
-            // may be empty when the path has no known deriver).
-            let deriver_bytes: &[u8] = path_info.deriver.0.0.as_ref();
-            if deriver_bytes.is_empty() || deriver_bytes == b"unknown-deriver" {
-                // No deriver — add to input_sources so the path is
-                // available in the sandbox directly.
-                event!(
-                    Level::DEBUG,
-                    store_path = %abs_path,
-                    "No deriver for discovered store path, adding as input source"
-                );
-                self.path_info_cache
-                    .write()
-                    .insert(abs_path, PathInfoCacheEntry::Source);
-                extra_sources.push(sp.clone());
-                continue;
-            }
-
-            let deriver_str = String::from_utf8_lossy(deriver_bytes);
-
-            // The deriver may or may not have the /nix/store/ prefix
-            // depending on the daemon protocol version.  Normalise to
-            // an absolute path.
-            let drv_abs_path = if deriver_str.starts_with('/') {
-                deriver_str.to_string()
-            } else {
-                format!("{STORE_DIR_WITH_SLASH}{deriver_str}")
-            };
-
-            // Parse the deriver as a StorePath.
-            let drv_store_path =
-                match StorePath::<String>::from_absolute_path(drv_abs_path.as_bytes()) {
-                    Ok(sp) => sp,
-                    Err(e) => {
-                        event!(
-                            Level::WARN,
-                            store_path = %abs_path,
-                            deriver = %drv_abs_path,
-                            error = %e,
-                            "Bad deriver path for discovered store path, skipping"
-                        );
-                        self.path_info_cache
-                            .write()
-                            .insert(abs_path, PathInfoCacheEntry::NotFound);
-                        continue;
-                    }
-                };
-
-            // Read the .drv to find which output name produces our store
-            // path, and compute its hash_derivation_modulo.
-            // The .drv may have been garbage-collected while the output
-            // path is still alive (kept by a GC root).  This is expected
-            // to happen occasionally, so we skip with a warning.
-            let drv_bytes = match tokio::fs::read(&drv_abs_path).await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    event!(
-                        Level::WARN,
-                        store_path = %abs_path,
-                        deriver = %drv_abs_path,
-                        error = %e,
-                        "Deriver .drv not found in store (may have been \
-                         garbage-collected), skipping"
-                    );
-                    self.path_info_cache
-                        .write()
-                        .insert(abs_path, PathInfoCacheEntry::NotFound);
-                    continue;
-                }
-            };
-            let drv = match Derivation::from_aterm_bytes(&drv_bytes) {
-                Ok(d) => d,
-                Err(e) => {
-                    event!(
-                        Level::WARN,
-                        store_path = %abs_path,
-                        deriver = %drv_abs_path,
-                        error = ?e,
-                        "Failed to parse deriver .drv, skipping"
-                    );
-                    self.path_info_cache
-                        .write()
-                        .insert(abs_path, PathInfoCacheEntry::NotFound);
-                    continue;
-                }
-            };
-
-            // Find which output name corresponds to the discovered store
-            // path.  Fall back to "out" if we can't match (e.g. the
-            // output paths aren't filled in).
-            let output_name = drv
-                .outputs
-                .iter()
-                .find_map(|(name, output)| {
-                    output.path.as_ref().and_then(|p| {
-                        if p.to_absolute_path() == abs_path {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_else(|| "out".to_string());
-
-            // Compute hash_derivation_modulo (synchronous, reads .drv
-            // files from /nix/store).  The returned value is already
-            // inserted into hash_cache as a side effect; we don't need
-            // it here.
-            match compute_hash_derivation_modulo(&drv_abs_path, hash_cache) {
-                Ok(hash) => {
-                    // Cache the successful resolution for other workers.
-                    self.path_info_cache.write().insert(
-                        abs_path.clone(),
-                        PathInfoCacheEntry::Resolved {
-                            drv_store_path: drv_store_path.clone(),
-                            output_name: output_name.clone(),
-                            hash_derivation_modulo: hash,
-                        },
-                    );
-                }
-                Err(e) => {
-                    event!(
-                        Level::WARN,
-                        store_path = %abs_path,
-                        deriver = %drv_abs_path,
-                        error = ?e,
-                        "Failed to compute hash_derivation_modulo for \
-                         deriver, skipping"
-                    );
-                    self.path_info_cache
-                        .write()
-                        .insert(abs_path, PathInfoCacheEntry::NotFound);
-                    continue;
-                }
-            }
-
-            event!(
-                Level::DEBUG,
-                store_path = %abs_path,
-                deriver = %drv_abs_path,
-                output_name = %output_name,
-                "Resolved discovered store path to input derivation"
-            );
-
-            if seen_outputs.insert((drv_abs_path.clone(), output_name.clone())) {
-                resolved_drvs.push(ResolvedInputDrv {
-                    drv_store_path,
-                    output_name,
-                });
-            }
-        }
-
-        Ok((resolved_drvs, extra_sources))
+    ) -> Vec<StorePath<String>> {
+        discovered
+            .iter()
+            .filter(|sp| !already_known_sources.contains(*sp))
+            .cloned()
+            .collect()
     }
 
     /// Prepare and upload a Nix derivation for this action:
@@ -1145,26 +938,22 @@ impl NixWorker {
         let cas_input_sources: BTreeSet<StorePath<String>> =
             entries.iter().map(|e| e.store_path.to_owned()).collect();
 
-        // Resolve each discovered store path: find its deriver (if any),
-        // determine the output name, and compute hash_derivation_modulo.
+        // Every discovered store path becomes an input source directly — see
+        // resolve_discovered_store_paths for why we no longer try to resolve
+        // any of them to a deriver.
         //
-        // We seed the hash cache with the runner's hash so it is never
-        // re-read from disk.
+        // The hash cache still only needs to carry the runner's own
+        // pre-computed hash; nothing else populates it now that no deriver
+        // is ever resolved.
         let ri = &self.runner_info;
-        let mut hash_cache: HashMap<String, [u8; 32]> = HashMap::from([(
+        let hash_cache: HashMap<String, [u8; 32]> = HashMap::from([(
             ri.drv_store_path.to_absolute_path(),
             ri.hash_derivation_modulo,
         )]);
 
         let resolve_start = Instant::now();
-        let (resolved_drvs, extra_sources) = self
-            .resolve_discovered_store_paths(
-                &discovered_store_paths,
-                &cas_input_sources,
-                &mut hash_cache,
-            )
-            .await
-            .err_tip(|| "Resolving discovered store paths")?;
+        let extra_sources =
+            Self::resolve_discovered_store_paths(&discovered_store_paths, &cas_input_sources);
         self.stats
             .record(&self.stats.query_path_info_us, resolve_start.elapsed());
 
@@ -1178,10 +967,9 @@ impl NixWorker {
             "Store-path scanning completed"
         );
 
-        if !resolved_drvs.is_empty() || !extra_sources.is_empty() {
+        if !extra_sources.is_empty() {
             event!(
                 Level::DEBUG,
-                num_input_drvs = resolved_drvs.len(),
                 num_extra_sources = extra_sources.len(),
                 "Discovered Nix store path dependencies in action"
             );
@@ -1235,21 +1023,14 @@ impl NixWorker {
 
         // ── Build input_derivations ────────────────────────────────────
         //
-        // Always include the runner.  Then merge in every deriver that
-        // was resolved from discovered store paths.
-        let mut input_derivations: BTreeMap<StorePath<String>, BTreeSet<String>> =
+        // Just the runner — no discovered store path is ever resolved to a
+        // deriver now (see resolve_discovered_store_paths).
+        let input_derivations: BTreeMap<StorePath<String>, BTreeSet<String>> =
             BTreeMap::from([(ri.drv_store_path.clone(), BTreeSet::from(["out".into()]))]);
-
-        for resolved in &resolved_drvs {
-            input_derivations
-                .entry(resolved.drv_store_path.clone())
-                .or_default()
-                .insert(resolved.output_name.clone());
-        }
 
         // ── Build input_sources ────────────────────────────────────────
         //
-        // CAS entries plus any discovered store paths that had no deriver.
+        // CAS entries plus every other discovered store path.
         let mut input_sources = cas_input_sources;
         input_sources.extend(extra_sources);
 
@@ -1267,8 +1048,9 @@ impl NixWorker {
         // ── Compute hash_derivation_modulo ─────────────────────────────
         //
         // The closure must return the hash for every input derivation.
-        // We pre-populated hash_cache with the runner and all resolved
-        // derivers above, so lookup is infallible.
+        // input_derivations now only ever contains the runner (see
+        // resolve_discovered_store_paths), whose hash we pre-populated
+        // above, so lookup is infallible.
         let hash_modulo = derivation.hash_derivation_modulo(|input_drv_path| {
             let abs = input_drv_path.to_absolute_path();
             *hash_cache
