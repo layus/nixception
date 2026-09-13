@@ -98,27 +98,34 @@ nixceptionStartPhase() {
     # All tools are invoked via their full store paths baked in at hook-install
     # time – none of them need to be on PATH.
     #
-    # In verbose mode the default RUST_LOG level is "info" and server output is
-    # timestamped and forwarded to stderr.  In quiet mode the level drops to
-    # "warn" and output goes to a log file that is only shown on failure.
-    # If the caller already set RUST_LOG we never override it.
-    local _rust_log
-    if [ -n "${RUST_LOG:-}" ]; then
-        _rust_log="$RUST_LOG"
+    # nixception reads NIXCEPTION_LOG for its log level in preference to
+    # RUST_LOG (see src/bin/nixception.rs, which bridges NIXCEPTION_LOG into
+    # RUST_LOG before tracing is initialised) — that lets a caller who already
+    # sets RUST_LOG for their own tooling still control nixception's log level
+    # independently.  In verbose mode the default level is "info" and server
+    # output is timestamped and forwarded to stderr.  In quiet mode the level
+    # drops to "warn" and output goes to a log file that is only shown on
+    # failure.  If the caller already set NIXCEPTION_LOG (or, failing that,
+    # RUST_LOG) we never override it.
+    local _nixception_log_level
+    if [ -n "${NIXCEPTION_LOG:-}" ]; then
+        _nixception_log_level="$NIXCEPTION_LOG"
+    elif [ -n "${RUST_LOG:-}" ]; then
+        _nixception_log_level="$RUST_LOG"
     elif [ "$_verbose" = "1" ]; then
-        _rust_log="info"
+        _nixception_log_level="info"
     else
-        _rust_log="warn"
+        _nixception_log_level="warn"
     fi
 
     _nixception_log "starting nixception server..."
     if [ "$_verbose" = "1" ]; then
-        RUST_LOG="$_rust_log" \
+        NIXCEPTION_LOG="$_nixception_log_level" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > >(@moreutils@/bin/ts -s '[nixception] %H:%M:%.S' >&2) 2>&1 &
     else
-        RUST_LOG="$_rust_log" \
+        NIXCEPTION_LOG="$_nixception_log_level" \
             RUST_BACKTRACE=1 \
             @nixception@/bin/nixception \
             > "$_logfile" 2>&1 &
