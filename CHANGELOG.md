@@ -5,6 +5,33 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [0.6.1] - 2026-09-13
+
+### Fixed
+
+- **Cache-hit/miss reporting was wrong for every action.** The runner
+  (`tools/runner/runner.cpp`) had silently stopped writing `$out/timing.json`
+  — that instrumentation was added in one commit and reverted three days
+  later by an unrelated "sync `tools/` up to the current nixpkgs-fork
+  versions" commit, whose sync direction was backwards (the nixpkgs fork's
+  copy actually predated the addition, so the sync pulled the old copy back
+  in and silently dropped it, along with the executable-bit fix restored
+  separately in v0.6.0). `nix_worker.rs`'s cache classification treats a
+  missing `timing.json` as proof of a cache hit, so with the file never
+  written, every action — cached or freshly executed — was reported as
+  cached: 100% hit rates, an "Execution: none" summary, and a zeroed-out
+  "Command execution" breakdown, even immediately after clearing the REAPI
+  action cache and forcing a real, multi-second compile. `write_timing()` and
+  the `std::chrono` setup/task/wrap-up measurement are restored.
+- **`NIXCEPTION_LOG` was not honored by the setup hook.** The same backwards
+  sync also replaced the hook's `NIXCEPTION_LOG` handling with a plain
+  `RUST_LOG` passthrough. `nixception`'s own `main()` bridges `NIXCEPTION_LOG`
+  into `RUST_LOG` and gives it precedence when both are set, so this silently
+  demoted the server's documented primary log-level knob to a no-op whenever
+  `RUST_LOG` happened to already be set in the caller's environment. The hook
+  now checks `NIXCEPTION_LOG` first, falling back to `RUST_LOG`, then to the
+  verbose/quiet default, matching the server's own documented precedence.
+
 ## [0.6.0] - 2026-09-12
 
 ### Fixed

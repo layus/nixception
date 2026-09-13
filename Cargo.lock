@@ -2857,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "nixception"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-lock",
  "axum",

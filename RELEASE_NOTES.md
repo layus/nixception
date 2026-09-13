@@ -1,28 +1,30 @@
-# nixception 0.6.0
+# nixception 0.6.1
 
-This release fixes a cache-parity bug: actions built through `nix develop`
-could fail to hit the cache of an otherwise byte-identical action built
-through `nix build`, because of a Nix daemon quirk that had nothing to do
-with the actions actually differing.
+This release fixes two regressions introduced by an unrelated commit back in
+July whose "sync `tools/` up to the current nixpkgs-fork versions" went
+backwards — the nixpkgs fork's copy was actually older, so the sync silently
+reverted work that had landed just days earlier. One of the two reverted
+pieces (an executable-bit fix) was caught and restored in v0.6.0; these two
+were not.
 
 ## Highlights
 
-- **Discovered `/nix/store/…` paths are always input sources, never resolved
-  to a deriver.** Preparing an action's derivation used to ask the Nix daemon
-  for each discovered store path's deriver, and reference that deriver
-  instead of the path itself when one was found — more precise, but it
-  turned out to be unreliable rather than merely unavailable. Inside a
-  `recursive-nix` sandboxed build (every real `nix build` action goes through
-  one), the daemon nixception talks to is Nix's own `RestrictedStore`, which
-  unconditionally strips deriver info from every reply as impure — so a real
-  build's actions always resolved paths as plain sources. A caller outside
-  that sandbox (`nix develop`, talking to the host daemon directly) could
-  resolve some of the very same paths to derivers instead, giving an
-  otherwise identical action a different derivation shape — and hash — than
-  the one a real build produced, defeating the cache across that boundary.
-  Every discovered path is now an input source, unconditionally: less
-  precise, but deterministic from any calling context, with no daemon
-  round-trip (and its context-dependent answer) involved.
+- **Cache-hit/miss reporting was wrong for every action.** The runner had
+  stopped writing `$out/timing.json`, and nixception's cache classification
+  treats a missing timing record as proof of a cache hit — so with the file
+  never written, every action was reported as cached, regardless of whether
+  it actually executed. A freshly cache-cleared, multi-second-long compile
+  would print "Execution: none (all actions were cached)" and a 100% hit
+  rate. Timing instrumentation (`setup`/`task`/`wrap-up`/nix→runner latency)
+  is restored, so both the cache accounting and the "Command execution"
+  breakdown in the timing summary are accurate again.
+- **`NIXCEPTION_LOG` was not honored.** The setup hook had been quietly
+  demoted to setting only `RUST_LOG`, even though the server's own `main()`
+  bridges `NIXCEPTION_LOG` into `RUST_LOG` and documents it as taking
+  precedence. Anyone with `RUST_LOG` already set in their environment for
+  other tooling would have that value silently used for nixception too,
+  instead of `NIXCEPTION_LOG`. The hook now checks `NIXCEPTION_LOG` first,
+  matching the server's documented precedence.
 
 See the [changelog](./CHANGELOG.md) for the full list.
 
