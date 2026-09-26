@@ -13,21 +13,12 @@
     # packaging, all of which postdate the previous nixos-unstable pin.
     nixpkgs.url = "github:NixOS/nixpkgs/f4220f112a5a6bdc03a69ce1633d099005174edc";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    git-hooks = {
-      url = "github:cachix/git-hooks.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane = {
       url = "github:ipetkov/crane";
-    };
-    nix2container = {
-      # TODO(SchahinRohani): Use a specific commit hash until nix2container is stable.
-      url = "github:nlewo/nix2container/cc96df7c3747c61c584d757cfc083922b4f4b33e";
-      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
@@ -36,7 +27,6 @@
     flake-parts,
     crane,
     rust-overlay,
-    nix2container,
     ...
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
@@ -46,43 +36,6 @@
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      imports = [
-        inputs.git-hooks.flakeModule
-        ./local-remote-execution/flake-module.nix
-        ./tools/darwin/flake-module.nix
-        ./tools/nixos/flake-module.nix
-        ./flake-module.nix
-      ];
-      flake = {
-        flakeModules = {
-          default = ./flake-module.nix;
-          darwin = ./tools/darwin/flake-module.nix;
-          lre = ./local-remote-execution/flake-module.nix;
-          nixos = ./tools/nixos/flake-module.nix;
-        };
-        overlays = {
-          lre = import ./local-remote-execution/overlays/default.nix {inherit nix2container;};
-          tools = import ./tools/public/default.nix {inherit nix2container;};
-        };
-        # TODO(jaroeichler): Keep template inputs on upstream.
-        templates = {
-          bazel = {
-            path = ./templates/bazel;
-            description = "Local remote execution with Bazel";
-            welcomeText = ''
-              # Getting started
-
-              Enter the Nix environment with `nix develop`.
-              Get your credentials for NativeLink and paste them into `user.bazelrc`.
-              Run `bazel build hello-world` to build the example with local
-              remote execution.
-
-              See <https://www.nativelink.com/docs/explanations/lre> for further
-              details on local remote execution.
-            '';
-          };
-        };
-      };
       perSystem = {
         config,
         pkgs,
@@ -90,7 +43,22 @@
         lib,
         ...
       }: let
-        craneLibFor = p: (crane.mkLib p).overrideToolchain pkgs.lre.stableRustFor;
+        # The Rust toolchain, with every musl/gnu target the cross builds
+        # below need. (Formerly provided by upstream NativeLink's
+        # local-remote-execution overlay.)
+        rustVersion = "1.96.1";
+        rustFor = p:
+          p.rust-bin.stable.${rustVersion}.default.override {
+            targets = [
+              "aarch64-unknown-linux-gnu"
+              "aarch64-unknown-linux-musl"
+              "x86_64-unknown-linux-gnu"
+              "x86_64-unknown-linux-musl"
+            ];
+          };
+        stable-rust = rustFor pkgs;
+
+        craneLibFor = p: (crane.mkLib p).overrideToolchain rustFor;
 
         src = pkgs.lib.cleanSourceWith {
           src = (craneLibFor pkgs).path ./.;
@@ -278,17 +246,10 @@
         nixception-aarch64-linux = nixceptionFor pkgs.pkgsCross.aarch64-multiplatform-musl;
         nixception-x86_64-linux = nixceptionFor pkgs.pkgsCross.musl64;
 
-        generate-toolchains = pkgs.callPackage ./tools/generate-toolchains.nix {};
-
-        build-chromium-tests = pkgs.writeShellScriptBin "build-chromium-tests" ./deploy/chromium-example/build_chromium_tests.sh;
-
-        docs = pkgs.callPackage ./tools/docs.nix {rust = pkgs.lre.stable-rust;};
       in rec {
         _module.args.pkgs = import self.inputs.nixpkgs {
           inherit system;
           overlays = [
-            self.overlays.lre
-            self.overlays.tools
             (import rust-overlay)
             (import ./tools/rust-overlay-cut-libsecret.nix)
           ];
@@ -297,10 +258,6 @@
           default = {
             type = "app";
             program = "${nixception}/bin/nixception";
-          };
-          native = {
-            type = "app";
-            program = "${pkgs.nativelink-tools.native-cli}/bin/native";
           };
         };
         packages =
@@ -315,11 +272,6 @@
 
             default = nixception;
 
-            inherit (pkgs) buildbox bazelisk;
-
-            generate-bazel-rc = pkgs.callPackage tools/generate-bazel-rc/build.nix {
-              craneLib = craneLibFor pkgs;
-            };
           }
           // (
             # It's not possible to crosscompile to darwin, not even between
@@ -343,157 +295,14 @@
         # standalone-test-fixture and nativelink-scheduler/tests/standalone_recc.rs,
         # which is driven by cargo, not `nix flake check`.
         checks = nixceptionChecks;
-        pre-commit.settings = {
-          hooks = import ./tools/pre-commit-hooks.nix {
-            inherit pkgs;
-            inherit (packages) generate-bazel-rc;
-            nightly-rust = pkgs.rust-bin.nightly.${pkgs.lre.nightly-rust.meta.version};
-          };
-        };
-        lre = {
-          Env = with pkgs.lre;
-            if pkgs.stdenv.isDarwin
-            then lre-rs.meta.Env # C++ doesn't support Darwin yet.
-            else (lre-cc.meta.Env ++ lre-rs.meta.Env);
-          prefix =
-            if pkgs.stdenv.isDarwin
-            then "macos"
-            else "linux";
-        };
-        nixos.path = with pkgs; [
-          "/run/current-system/sw/bin"
-          "${binutils.bintools}/bin"
-          "${pkgs.lre.clang}/bin"
-          "${git}/bin"
-
-          # In the lre-rs image these are copied to `/bin` by the create-worker
-          # function,
-          #
-          # Since we set `--incompatible_strict_action_env` in our .bazelrc we
-          # default to `PATH=/bin:/usr/bin:/usr/local/bin` on non-NixOS systems.
-          #
-          # On NixOS we override that path with what we have in this list. We
-          # could add `/bin` here, but using the explicit store paths adds
-          # another layer of safety so that we don't mix local and remote tools
-          # in cases where platform resolution doesn't behave as intended.
-          #
-          # Ideally, these shouldn't be in create-worker at all, and instead
-          # should be their own lre-shell toolchain "below" lre-cc, rather than
-          # a bolted-on-top layer in the final output.
-          #
-          # Note that these packages must be the same as the ones used in
-          # `create-worker.nix`.
-          "${bash}/bin"
-          "${coreutils}/bin"
-          "${gnused}/bin"
-        ];
         devShells.default = pkgs.mkShell {
-          packages = let
-            bazel = pkgs.writeShellScriptBin "bazel" ''
-              unset TMPDIR TMP
-              exec ${pkgs.bazelisk}/bin/bazelisk "$@"
-            '';
-          in
-            [
-              # Development tooling
-              pkgs.git
-              pkgs.pre-commit
-              pkgs.git-cliff
-              pkgs.buck2
-
-              # Rust
-              bazel
-              pkgs.lre.stable-rust
-              pkgs.lre.lre-rs.lre-rs-configs-gen
-              pkgs.rust-analyzer
-
-              ## Infrastructure
-              pkgs.awscli2
-              pkgs.google-cloud-sdk
-              pkgs.skopeo
-              pkgs.dive
-              pkgs.cosign
-              pkgs.kubectl
-              pkgs.kubernetes-helm
-              pkgs.cilium-cli
-              pkgs.vale
-              pkgs.trivy
-              pkgs.docker-client
-              pkgs.kind
-              pkgs.tektoncd-cli
-              pkgs.pulumi
-              pkgs.pulumiPackages.pulumi-go
-              pkgs.fluxcd
-              pkgs.go
-              pkgs.kustomize
-              pkgs.kubectx
-
-              # Web
-              pkgs.bun
-              pkgs.lychee
-              pkgs.nodejs_22 # For pagefind search
-              pkgs.playwright-driver
-              pkgs.playwright-test
-
-              # Additional tools from within our development environment.
-              build-chromium-tests
-              docs
-              generate-toolchains
-              pkgs.lre.clang
-              pkgs.nil
-              pkgs.nixd
-              pkgs.lre.lre-cc.lre-cc-configs-gen
-              pkgs.nativelink-tools.local-image-test
-              pkgs.nativelink-tools.native-cli
-              pkgs.nativelink-tools.create-local-image
-
-              # Tools for nix backend
-              pkgs.protobuf
-              pkgs.protoc-gen-rust
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.CoreFoundation
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.libiconv
-            ]
-            ++ pkgs.lib.optionals (pkgs.stdenv.system != "x86_64-darwin") [
-              # Old darwin systems are incompatible with deno.
-              pkgs.deno
-            ];
-
-          shellHook =
-            ''
-              # Generate the .pre-commit-config.yaml symlink when entering the
-              # development shell.
-              ${config.pre-commit.installationScript}
-
-              # Generate local-remote-execution.bazelrc which configures LRE toolchains when
-              # running in the nix environment.
-              ${config.lre.installationScript}
-
-              # Generate nativelink.bazelrc which gives Bazel invocations access
-              # to NativeLink's read-only cache.
-              ${config.nativelink.installationScript}
-
-              # If on NixOS, generate nixos.bazelrc, which adds the required
-              # NixOS binary paths to the bazel environment.
-              ${config.nixos.installationScript}
-
-              # If on Darwin, generate darwin.bazelrc, which configures darwin
-              # libs and frameworks.
-              ${config.darwin.installationScript}
-
-              # The Bazel and Cargo builds in nix require a Clang toolchain.
-              # TODO(palfrey): The Bazel build currently uses the
-              #                    irreproducible host C++ toolchain. Provide
-              #                    this toolchain via nix for bitwise identical
-              #                    binaries across machines.
-              export CC=clang
-            ''
-            # TODO(palfrey): Generalize this.
-            + pkgs.lib.optionalString (system == "x86_64-linux") ''
-              export CC_x86_64_unknown_linux_gnu=customClang
-            '';
+          packages = [
+            pkgs.git
+            stable-rust
+            pkgs.rust-analyzer
+            pkgs.nil
+            pkgs.protobuf
+          ];
         };
       };
     };
