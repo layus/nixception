@@ -32,9 +32,9 @@ The store module is designed with a composable pattern in mind. Store implementa
 
 ## Configuration
 
-Store configurations are typically defined in JSON configuration files.
-
-Example configuration patterns can be seen in the [NativeLink Config README](https://github.com/TraceMachina/nativelink/blob/main/nativelink-config/README.md).
+nixception wires its stores in code with the `topology!` macro (see
+`nativelink-topology` and `src/bin/nixception.rs`); each store keyword takes
+the matching spec struct from `nativelink-config/src/stores.rs`.
 
 ## Adding a New Store Implementation
 
