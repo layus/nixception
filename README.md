@@ -1,5 +1,7 @@
 # nixception
 
+<img src="docs/img/logo.png" alt="nixception logo" width="200">
+
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Test](https://github.com/layus/nixception/actions/workflows/test.yaml/badge.svg)](https://github.com/layus/nixception/actions/workflows/test.yaml)
 
