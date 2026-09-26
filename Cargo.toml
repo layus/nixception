@@ -66,21 +66,6 @@ tracing = { version = "0.1.41", default-features = false }
 nix-compat = { path = "vendor/tvix/tvix/nix-compat" }
 nix-remote = { path = "vendor/nix-remote-rust/nix-remote" }
 
-[workspace.cargo-features-manager.keep]
-async-lock = ["std"]
-aws-sdk-s3 = ["rt-tokio"]
-aws-smithy-runtime = ["test-util"]
-# This causes blake3 to detect SIMD capabilities at runtime.
-blake3 = ["std"]
-pretty_assertions = ["std"]
-redis-test = ["aio"]
-serial_test = ["async"]
-tokio = ["fs", "io-util", "rt-multi-thread", "signal"]
-tokio-stream = ["fs"]
-tonic = ["tls", "transport"]
-tonic-build = ["prost"]
-uuid = ["serde", "v4"]
-
 [workspace.lints.rust]
 ambiguous-glob-reexports = "deny"
 clashing-extern-declarations = "deny"
