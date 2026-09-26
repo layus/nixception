@@ -14,7 +14,7 @@
 
 // *** DO NOT MODIFY ***
 // This file is auto-generated. To update it, run:
-// `bazel run nativelink-proto:update_protos`
+// `nativelink-proto/update_protos.sh`
 
 #![allow(
     unknown_lints,

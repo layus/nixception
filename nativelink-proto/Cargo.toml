@@ -16,3 +16,8 @@ tonic = { version = "0.13.0", features = ["codegen", "prost", "transport", "tls-
 [dev-dependencies]
 prost-build = { version = "0.13.5", default-features = false }
 tonic-build = { version = "0.13.0", features = ["prost"], default-features = false }
+
+# Regenerates `genproto/`; run through `update_protos.sh`.
+[[example]]
+name = "gen_protos_tool"
+path = "gen_protos_tool.rs"
