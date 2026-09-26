@@ -2588,12 +2588,8 @@ dependencies = [
 name = "nativelink-service"
 version = "0.7.0"
 dependencies = [
- "async-lock",
- "async-trait",
- "axum",
  "bytes",
  "futures",
- "hex",
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
@@ -2601,28 +2597,22 @@ dependencies = [
  "nativelink-config",
  "nativelink-error",
  "nativelink-macro",
- "nativelink-metric",
  "nativelink-proto",
  "nativelink-scheduler",
  "nativelink-store",
  "nativelink-topology",
  "nativelink-util",
  "opentelemetry",
- "opentelemetry-semantic-conventions",
  "parking_lot",
  "pretty_assertions",
  "prost",
  "prost-types",
- "rand 0.9.5",
- "serde_json5",
- "sha2",
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
  "tower 0.5.3",
  "tracing",
  "tracing-test",
- "uuid",
 ]
 
 [[package]]
@@ -2699,7 +2689,6 @@ dependencies = [
  "nativelink-service",
  "nativelink-store",
  "nativelink-util",
- "tokio",
  "tonic 0.13.1",
 ]
 
