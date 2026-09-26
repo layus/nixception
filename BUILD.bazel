@@ -23,7 +23,6 @@ rust_binary(
         "//nativelink-service",
         "//nativelink-store",
         "//nativelink-util",
-        "//nativelink-worker",
         "@crates//:async-lock",
         "@crates//:axum",
         "@crates//:clap",
@@ -52,7 +51,6 @@ filegroup(
         "//nativelink-service:docs",
         "//nativelink-store:docs",
         "//nativelink-util:docs",
-        "//nativelink-worker:docs",
     ],
 )
 
@@ -67,7 +65,6 @@ test_suite(
         "//nativelink-service:unit_test",
         "//nativelink-store:unit_test",
         "//nativelink-util:unit_test",
-        "//nativelink-worker:unit_test",
     ],
 )
 
@@ -82,7 +79,6 @@ test_suite(
         "//nativelink-service:doc_test",
         "//nativelink-store:doc_test",
         "//nativelink-util:doc_test",
-        "//nativelink-worker:doc_test",
     ],
 )
 

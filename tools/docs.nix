@@ -15,6 +15,5 @@ writeShellScriptBin "docs" ''
       -p nativelink-service \
       -p nativelink-store \
       -p nativelink-util \
-      -p nativelink-worker \
       --open
 ''

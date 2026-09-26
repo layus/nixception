@@ -44,7 +44,6 @@ crate.from_cargo(
         "//nativelink-service:Cargo.toml",
         "//nativelink-store:Cargo.toml",
         "//nativelink-util:Cargo.toml",
-        "//nativelink-worker:Cargo.toml",
     ],
     supported_platform_triples = [
         "aarch64-apple-darwin",
