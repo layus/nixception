@@ -36,11 +36,6 @@
 pub mod build {
     pub mod bazel {
         pub mod remote {
-            pub mod asset {
-                pub mod v1 {
-                    include!("build.bazel.remote.asset.v1.pb.rs");
-                }
-            }
             pub mod execution {
                 pub mod v2 {
                     include!("build.bazel.remote.execution.v2.pb.rs");
@@ -73,49 +68,10 @@ pub mod google {
     pub mod bytestream {
         include!("google.bytestream.pb.rs");
     }
-    pub mod devtools {
-        pub mod build {
-            pub mod v1 {
-                include!("google.devtools.build.v1.pb.rs");
-            }
-        }
-    }
     pub mod longrunning {
         include!("google.longrunning.pb.rs");
     }
     pub mod rpc {
         include!("google.rpc.pb.rs");
     }
-}
-pub mod build_event_stream {
-    include!("build_event_stream.pb.rs");
-}
-pub mod command_line {
-    include!("command_line.pb.rs");
-}
-pub mod devtools {
-    pub mod build {
-        pub mod lib {
-            pub mod packages {
-                pub mod metrics {
-                    include!("devtools.build.lib.packages.metrics.pb.rs");
-                }
-            }
-        }
-    }
-}
-pub mod blaze {
-    include!("blaze.pb.rs");
-    pub mod invocation_policy {
-        include!("blaze.invocation_policy.pb.rs");
-    }
-    pub mod strategy_policy {
-        include!("blaze.strategy_policy.pb.rs");
-    }
-}
-pub mod options {
-    include!("options.pb.rs");
-}
-pub mod failure_details {
-    include!("failure_details.pb.rs");
 }
