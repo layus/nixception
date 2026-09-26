@@ -1,0 +1,41 @@
+module(
+    name = "hello-world-nixpkgs",
+    version = "0.0.0",
+)
+
+# rules_nixpkgs_core is available on the BCR.
+bazel_dep(name = "rules_nixpkgs_core", version = "0.13.0")
+
+# rules_nixpkgs_cc is not on the BCR yet; use archive_override.
+bazel_dep(name = "rules_nixpkgs_cc", version = "0.13.0")
+archive_override(
+    module_name = "rules_nixpkgs_cc",
+    integrity = "sha256-MCcfe9OA5OIOTXEywySUbE/bwx6+C7tmOKD2GjfnQ5c=",
+    strip_prefix = "rules_nixpkgs-0.13.0/toolchains/cc",
+    urls = ["https://github.com/tweag/rules_nixpkgs/releases/download/v0.13.0/rules_nixpkgs-0.13.0.tar.gz"],
+)
+
+# Transitive dependencies of rules_nixpkgs_cc.
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "rules_cc", version = "0.1.0")
+bazel_dep(name = "platforms", version = "0.0.10")
+
+# ── Nixpkgs repository ──────────────────────────────────────────────────
+# Use nix_repo.github to fetch nixpkgs as an HTTP archive (cached by
+# Bazel's --repository_cache), rather than nix_repo.file which would
+# require nix evaluation at fetch time.
+nix_repo = use_extension("@rules_nixpkgs_core//extensions:repository.bzl", "nix_repo")
+nix_repo.github(
+    name = "nixpkgs",
+    sha256 = "911314b81780f26fdaf87e17174210bdbd40c86bac1795212f257cdc236a1e78",
+    tag = "24.05",
+)
+use_repo(nix_repo, "nixpkgs")
+
+# ── CC toolchain from Nixpkgs ───────────────────────────────────────────
+cc_configure = use_extension("//:extension.bzl", "cc_configure")
+use_repo(cc_configure, "nixpkgs_config_cc")
+use_repo(cc_configure, "nixpkgs_config_cc_toolchains")
+use_repo(cc_configure, "nixpkgs_config_cc_info")
+
+register_toolchains("@nixpkgs_config_cc_toolchains//:all")

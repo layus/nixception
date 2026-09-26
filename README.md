@@ -35,6 +35,10 @@ how the two projects and their licenses relate.
 > **Status**: experimental. Interfaces (server topology, setup hook contract,
 > derivation encoding) are still moving.
 
+> **Want to try it right away?** See [`demo/`](./demo) for a self-contained
+> flake with runnable examples (recc, Bazel) and benchmarks — no sibling
+> checkouts required.
+
 ## How it works
 
 The `nixception` binary (`src/bin/nixception.rs`) is a NativeLink server

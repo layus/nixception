@@ -1,0 +1,19 @@
+/result
+/result-*
+
+# Build artifacts left by slow-compile-test.sh (runs buildPhase in place)
+/slow-compile/*.o
+/slow-compile/slow_demo
+
+# Build artifacts left by slow-bazel-test.sh (runs buildPhase in place)
+/bazel/slow-compile/bazel-*
+/bazel/slow-compile/repo_cache
+/bazel/slow-compile/MODULE.bazel.lock
+/bazel/slow-compile/.bazelrc.user
+
+# Output of benchmarks/*.sh (+ their .gnuplot charts) — the .sh/.gnuplot
+# scripts themselves stay tracked.
+/benchmarks/*.json
+/benchmarks/*.md
+/benchmarks/*.dat
+/benchmarks/*.png
