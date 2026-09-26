@@ -235,6 +235,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[cfg(feature = "redis")]
 impl From<fred::error::Error> for Error {
     fn from(error: fred::error::Error) -> Self {
         use fred::error::ErrorKind::{

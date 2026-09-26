@@ -9,13 +9,20 @@ edition = "2024"
 name = "nativelink-error"
 version = "0.7.0"
 
+[features]
+default = []
+# Pulls in the `From<fred::error::Error>` conversion. Kept optional so a
+# nixception build without the Redis store need not compile `fred` at all
+# (it was previously an unconditional dep of every crate via this one impl).
+redis = ["dep:fred"]
+
 [dependencies]
 nativelink-metric = { path = "../nativelink-metric" }
 nativelink-proto = { path = "../nativelink-proto" }
 
 fred = { version = "10.1.0", default-features = false, features = [
   "enable-rustls-ring",
-] }
+], optional = true }
 prost = { version = "0.13.5", default-features = false }
 prost-types = { version = "0.13.5", default-features = false }
 serde = { version = "1.0.219", default-features = false }

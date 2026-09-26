@@ -14,12 +14,17 @@
 
 use core::pin::Pin;
 use std::sync::Arc;
+#[cfg(any(feature = "s3", feature = "gcs"))]
 use std::time::SystemTime;
 
 use futures::stream::FuturesOrdered;
 use futures::{Future, TryStreamExt};
-use nativelink_config::stores::{ExperimentalCloudObjectSpec, StoreSpec};
+#[cfg(any(feature = "s3", feature = "gcs"))]
+use nativelink_config::stores::ExperimentalCloudObjectSpec;
+use nativelink_config::stores::StoreSpec;
 use nativelink_error::Error;
+#[cfg(not(all(feature = "s3", feature = "gcs", feature = "redis", feature = "mongo")))]
+use nativelink_error::make_input_err;
 use nativelink_util::health_utils::HealthRegistryBuilder;
 use nativelink_util::store_trait::{Store, StoreDriver};
 
@@ -29,15 +34,21 @@ use crate::dedup_store::DedupStore;
 use crate::existence_cache_store::ExistenceCacheStore;
 use crate::fast_slow_store::FastSlowStore;
 use crate::filesystem_store::FilesystemStore;
+#[cfg(feature = "gcs")]
 use crate::gcs_store::GcsStore;
 use crate::grpc_store::GrpcStore;
 use crate::memory_store::MemoryStore;
+#[cfg(feature = "mongo")]
 use crate::mongo_store::ExperimentalMongoStore;
 use crate::noop_store::NoopStore;
+#[cfg(feature = "s3")]
 use crate::ontap_s3_existence_cache_store::OntapS3ExistenceCache;
+#[cfg(feature = "s3")]
 use crate::ontap_s3_store::OntapS3Store;
+#[cfg(feature = "redis")]
 use crate::redis_store::RedisStore;
 use crate::ref_store::RefStore;
+#[cfg(feature = "s3")]
 use crate::s3_store::S3Store;
 use crate::nix_store::NixStore;
 use crate::shard_store::ShardStore;
@@ -55,19 +66,45 @@ pub fn store_factory<'a>(
     Box::pin(async move {
         let store: Arc<dyn StoreDriver> = match backend {
             StoreSpec::Memory(spec) => MemoryStore::new(spec),
+            #[cfg(any(feature = "s3", feature = "gcs"))]
             StoreSpec::ExperimentalCloudObjectStore(spec) => match spec {
+                #[cfg(feature = "s3")]
                 ExperimentalCloudObjectSpec::Aws(aws_config) => {
                     S3Store::new(aws_config, SystemTime::now).await?
                 }
+                #[cfg(feature = "s3")]
                 ExperimentalCloudObjectSpec::Ontap(ontap_config) => {
                     OntapS3Store::new(ontap_config, SystemTime::now).await?
                 }
+                #[cfg(feature = "gcs")]
                 ExperimentalCloudObjectSpec::Gcs(gcs_config) => {
                     GcsStore::new(gcs_config, SystemTime::now).await?
                 }
+                #[cfg(not(all(feature = "s3", feature = "gcs")))]
+                _ => {
+                    return Err(make_input_err!(
+                        "This nixception build was compiled without support for the requested \
+                         cloud object store backend (enable the `s3` / `gcs` feature)"
+                    ));
+                }
             },
+            #[cfg(not(any(feature = "s3", feature = "gcs")))]
+            StoreSpec::ExperimentalCloudObjectStore(_) => {
+                return Err(make_input_err!(
+                    "This nixception build was compiled without cloud object store support \
+                     (enable the `s3` / `gcs` feature)"
+                ));
+            }
             StoreSpec::NixStore(spec) => NixStore::new(spec).await?,
+            #[cfg(feature = "redis")]
             StoreSpec::RedisStore(spec) => RedisStore::new(spec.clone())?,
+            #[cfg(not(feature = "redis"))]
+            StoreSpec::RedisStore(_) => {
+                return Err(make_input_err!(
+                    "This nixception build was compiled without Redis store support \
+                     (enable the `redis` feature)"
+                ));
+            }
             StoreSpec::Verify(spec) => VerifyStore::new(
                 spec,
                 store_factory(&spec.backend, store_manager, None).await?,
@@ -85,8 +122,16 @@ pub fn store_factory<'a>(
                 spec,
                 store_factory(&spec.backend, store_manager, None).await?,
             ),
+            #[cfg(feature = "s3")]
             StoreSpec::OntapS3ExistenceCache(spec) => {
                 OntapS3ExistenceCache::new(spec, SystemTime::now).await?
+            }
+            #[cfg(not(feature = "s3"))]
+            StoreSpec::OntapS3ExistenceCache(_) => {
+                return Err(make_input_err!(
+                    "This nixception build was compiled without ONTAP S3 support \
+                     (enable the `s3` feature)"
+                ));
             }
             StoreSpec::CompletenessChecking(spec) => CompletenessCheckingStore::new(
                 store_factory(&spec.backend, store_manager, None).await?,
@@ -106,7 +151,15 @@ pub fn store_factory<'a>(
             ),
             StoreSpec::Grpc(spec) => GrpcStore::new(spec).await?,
             StoreSpec::Noop(_) => NoopStore::new(),
+            #[cfg(feature = "mongo")]
             StoreSpec::ExperimentalMongo(spec) => ExperimentalMongoStore::new(spec.clone()).await?,
+            #[cfg(not(feature = "mongo"))]
+            StoreSpec::ExperimentalMongo(_) => {
+                return Err(make_input_err!(
+                    "This nixception build was compiled without MongoDB store support \
+                     (enable the `mongo` feature)"
+                ));
+            }
             StoreSpec::Shard(spec) => {
                 let stores = spec
                     .stores

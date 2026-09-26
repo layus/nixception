@@ -5,6 +5,26 @@ edition = "2024"
 name = "nativelink-store"
 version = "0.7.0"
 
+[features]
+default = []
+# S3-compatible object storage (AWS S3 + NetApp ONTAP S3).
+s3 = [
+  "dep:aws-config",
+  "dep:aws-sdk-s3",
+  "dep:aws-smithy-runtime-api",
+  "dep:aws-smithy-types",
+  "dep:hyper-rustls",
+]
+# Google Cloud Storage.
+gcs = ["dep:google-cloud-auth", "dep:google-cloud-storage"]
+# Redis-backed store.
+redis = ["dep:fred", "nativelink-error/redis"]
+# MongoDB-backed store.
+mongo = ["dep:mongodb"]
+# Convenience: every remote backend, for upstream-parity builds and the
+# full unit-test suite (`just test-standalone`).
+all-backends = ["s3", "gcs", "redis", "mongo"]
+
 [dependencies]
 nativelink-config = { path = "../nativelink-config" }
 nativelink-error = { path = "../nativelink-error" }
@@ -14,18 +34,20 @@ nativelink-util = { path = "../nativelink-util" }
 
 async-lock = { version = "3.4.0", features = ["std"], default-features = false }
 async-trait = "0.1.88"
-aws-config = { version = "1.6.1", default-features = false, features = ["sso"] }
+aws-config = { version = "1.6.1", default-features = false, features = [
+  "sso",
+], optional = true }
 aws-sdk-s3 = { version = "1.82.0", features = [
   "http-1x",
   "rt-tokio",
-], default-features = false }
+], default-features = false, optional = true }
 aws-smithy-runtime-api = { version = "1.7.4", default-features = false, features = [
   "client",
   "http-1x",
-] }
+], optional = true }
 aws-smithy-types = { version = "1.3.0", default-features = false, features = [
   "http-body-1-x",
-] }
+], optional = true }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 bincode = { version = "2.0.1", default-features = false, features = [
   "alloc",
@@ -48,13 +70,13 @@ fred = { version = "10.1.0", default-features = false, features = [
   "sentinel-client",
   "sha-1",
   "subscriber-client",
-] }
+], optional = true }
 futures = { version = "0.3.31", default-features = false }
-google-cloud-auth = { version = "0.17.2", default-features = false }
+google-cloud-auth = { version = "0.17.2", default-features = false, optional = true }
 google-cloud-storage = { version = "0.24.0", default-features = false, features = [
   "auth",
   "rustls-tls",
-] }
+], optional = true }
 hex = { version = "0.4.3", default-features = false }
 http = { version = "1.3.1", default-features = false }
 http-body = "1.0.1"
@@ -66,13 +88,13 @@ hyper-rustls = { version = "0.27.5", default-features = false, features = [
   "ring",
   "rustls-native-certs",
   "rustls-platform-verifier",
-] }
+], optional = true }
 hyper-util = { version = "0.1.11", default-features = false }
 lz4_flex = { version = "0.11.3", default-features = false }
 mongodb = { version = "3", features = [
   "compat-3-0-0",
   "rustls-tls",
-], default-features = false }
+], default-features = false, optional = true }
 opentelemetry = { version = "0.29.1", default-features = false }
 parking_lot = "0.12.3"
 patricia_tree = { version = "0.9.0", default-features = false }
@@ -82,7 +104,11 @@ rand = { version = "0.9.0", default-features = false, features = [
 ] }
 regex = { version = "1.11.1", default-features = false }
 rustls = { version = "0.23.27", default-features = false, features = [] }
-rustls-pemfile = { version = "2.1.2", default-features = false }
+# `std` is needed for `rustls_pemfile::certs`. It used to be enabled only via
+# feature unification with the top-level crate's own (unused) dependency.
+rustls-pemfile = { version = "2.1.2", default-features = false, features = [
+  "std",
+] }
 serde = { version = "1.0.219", default-features = false }
 serde_json = "1.0.140"
 sha2 = { version = "0.10.8", default-features = false }
@@ -112,6 +138,38 @@ workspace = true
 
 [dependencies.nix-remote]
 workspace = true
+
+# Backend-specific integration tests. Each is skipped unless its backend
+# feature is enabled (e.g. `cargo test --features all-backends`), so the
+# default `cargo test` — and the aws-* dev-dependencies it would otherwise
+# force — stay out of the lean build.
+[[test]]
+name = "s3_store_test"
+required-features = ["s3"]
+
+[[test]]
+name = "ontap_s3_store_test"
+required-features = ["s3"]
+
+[[test]]
+name = "ontap_s3_existence_cache_store_test"
+required-features = ["s3"]
+
+[[test]]
+name = "gcs_store_test"
+required-features = ["gcs"]
+
+[[test]]
+name = "gcs_client_test"
+required-features = ["gcs"]
+
+[[test]]
+name = "redis_store_test"
+required-features = ["redis"]
+
+[[test]]
+name = "mongo_store_test"
+required-features = ["mongo"]
 
 [dev-dependencies]
 nativelink-macro = { path = "../nativelink-macro" }

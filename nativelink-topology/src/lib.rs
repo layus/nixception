@@ -248,11 +248,20 @@ pub mod __rt {
         CacheLookupSpec, GrpcSpec as SchedGrpcSpec, NixProxySpec, PropertyModifierSpec, SimpleSpec,
     };
     pub use nativelink_config::stores::{
-        CompressionSpec, DedupSpec, ExistenceCacheSpec, ExperimentalAwsSpec, ExperimentalGcsSpec,
-        ExperimentalMongoSpec, ExperimentalOntapS3Spec, FastSlowSpec, FilesystemSpec,
-        GrpcSpec as StoreGrpcSpec, MemorySpec, NixSpec, OntapS3ExistenceCacheSpec, RedisSpec,
-        RefSpec, ShardConfig, ShardSpec, SizePartitioningSpec, VerifySpec,
+        CompressionSpec, DedupSpec, ExistenceCacheSpec, FastSlowSpec, FilesystemSpec,
+        GrpcSpec as StoreGrpcSpec, MemorySpec, NixSpec, RefSpec, ShardConfig, ShardSpec,
+        SizePartitioningSpec, VerifySpec,
     };
+    #[cfg(feature = "s3")]
+    pub use nativelink_config::stores::{
+        ExperimentalAwsSpec, ExperimentalOntapS3Spec, OntapS3ExistenceCacheSpec,
+    };
+    #[cfg(feature = "gcs")]
+    pub use nativelink_config::stores::ExperimentalGcsSpec;
+    #[cfg(feature = "mongo")]
+    pub use nativelink_config::stores::ExperimentalMongoSpec;
+    #[cfg(feature = "redis")]
+    pub use nativelink_config::stores::RedisSpec;
     pub use nativelink_scheduler::default_scheduler_factory::{
         cache_lookup_scheduler_factory, grpc_scheduler_factory, nix_scheduler_factory,
         property_modifier_scheduler_factory, simple_scheduler_factory,
@@ -269,16 +278,22 @@ pub mod __rt {
     pub use nativelink_store::existence_cache_store::ExistenceCacheStore;
     pub use nativelink_store::fast_slow_store::FastSlowStore;
     pub use nativelink_store::filesystem_store::FilesystemStore;
+    #[cfg(feature = "gcs")]
     pub use nativelink_store::gcs_store::GcsStore;
     pub use nativelink_store::grpc_store::GrpcStore;
     pub use nativelink_store::memory_store::MemoryStore;
+    #[cfg(feature = "mongo")]
     pub use nativelink_store::mongo_store::ExperimentalMongoStore;
     pub use nativelink_store::nix_store::NixStore;
     pub use nativelink_store::noop_store::NoopStore;
+    #[cfg(feature = "s3")]
     pub use nativelink_store::ontap_s3_existence_cache_store::OntapS3ExistenceCache;
+    #[cfg(feature = "s3")]
     pub use nativelink_store::ontap_s3_store::OntapS3Store;
+    #[cfg(feature = "redis")]
     pub use nativelink_store::redis_store::RedisStore;
     pub use nativelink_store::ref_store::RefStore;
+    #[cfg(feature = "s3")]
     pub use nativelink_store::s3_store::S3Store;
     pub use nativelink_store::shard_store::ShardStore;
     pub use nativelink_store::size_partitioning_store::SizePartitioningStore;
@@ -412,37 +427,61 @@ macro_rules! __topology_store {
             <$crate::__rt::FilesystemStore>::new(&$crate::__rt::FilesystemSpec { $($f)* }).await?,
         )
     };
-    ($sm:ident, Redis { $($f:tt)* }) => {
-        $crate::__rt::Store::new($crate::__rt::RedisStore::new($crate::__rt::RedisSpec { $($f)* })?)
-    };
+    // Backend stores below are compiled only when their `nativelink-store`
+    // feature is enabled (default nixception builds enable none of them).
+    // With the feature off, the arm expands to a `compile_error!` naming the
+    // feature to turn on, so a stray `Redis { … }` / `Aws { … }` in a
+    // `topology!` invocation fails loudly rather than silently linking the
+    // backend.
+    ($sm:ident, Redis { $($f:tt)* }) => {{
+        #[cfg(feature = "redis")]
+        { $crate::__rt::Store::new($crate::__rt::RedisStore::new($crate::__rt::RedisSpec { $($f)* })?) }
+        #[cfg(not(feature = "redis"))]
+        { ::core::compile_error!("enable the `redis` feature to use `Redis` in topology!") }
+    }};
     ($sm:ident, Grpc { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::GrpcStore::new(&$crate::__rt::StoreGrpcSpec { $($f)* }).await?)
     };
-    ($sm:ident, Mongo { $($f:tt)* }) => {
-        $crate::__rt::Store::new(
+    ($sm:ident, Mongo { $($f:tt)* }) => {{
+        #[cfg(feature = "mongo")]
+        { $crate::__rt::Store::new(
             $crate::__rt::ExperimentalMongoStore::new($crate::__rt::ExperimentalMongoSpec { $($f)* }).await?,
-        )
-    };
-    ($sm:ident, Aws { $($f:tt)* }) => {
-        $crate::__rt::Store::new(
+        ) }
+        #[cfg(not(feature = "mongo"))]
+        { ::core::compile_error!("enable the `mongo` feature to use `Mongo` in topology!") }
+    }};
+    ($sm:ident, Aws { $($f:tt)* }) => {{
+        #[cfg(feature = "s3")]
+        { $crate::__rt::Store::new(
             $crate::__rt::S3Store::new(&$crate::__rt::ExperimentalAwsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
-        )
-    };
-    ($sm:ident, Gcs { $($f:tt)* }) => {
-        $crate::__rt::Store::new(
+        ) }
+        #[cfg(not(feature = "s3"))]
+        { ::core::compile_error!("enable the `s3` feature to use `Aws` in topology!") }
+    }};
+    ($sm:ident, Gcs { $($f:tt)* }) => {{
+        #[cfg(feature = "gcs")]
+        { $crate::__rt::Store::new(
             $crate::__rt::GcsStore::new(&$crate::__rt::ExperimentalGcsSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
-        )
-    };
-    ($sm:ident, OntapS3 { $($f:tt)* }) => {
-        $crate::__rt::Store::new(
+        ) }
+        #[cfg(not(feature = "gcs"))]
+        { ::core::compile_error!("enable the `gcs` feature to use `Gcs` in topology!") }
+    }};
+    ($sm:ident, OntapS3 { $($f:tt)* }) => {{
+        #[cfg(feature = "s3")]
+        { $crate::__rt::Store::new(
             $crate::__rt::OntapS3Store::new(&$crate::__rt::ExperimentalOntapS3Spec { $($f)* }, $crate::__rt::SystemTime::now).await?,
-        )
-    };
-    ($sm:ident, OntapS3ExistenceCache { $($f:tt)* }) => {
-        $crate::__rt::Store::new(
+        ) }
+        #[cfg(not(feature = "s3"))]
+        { ::core::compile_error!("enable the `s3` feature to use `OntapS3` in topology!") }
+    }};
+    ($sm:ident, OntapS3ExistenceCache { $($f:tt)* }) => {{
+        #[cfg(feature = "s3")]
+        { $crate::__rt::Store::new(
             $crate::__rt::OntapS3ExistenceCache::new(&$crate::__rt::OntapS3ExistenceCacheSpec { $($f)* }, $crate::__rt::SystemTime::now).await?,
-        )
-    };
+        ) }
+        #[cfg(not(feature = "s3"))]
+        { ::core::compile_error!("enable the `s3` feature to use `OntapS3ExistenceCache` in topology!") }
+    }};
     ($sm:ident, Ref { $($f:tt)* }) => {
         $crate::__rt::Store::new($crate::__rt::RefStore::new(
             &$crate::__rt::RefSpec { $($f)* },

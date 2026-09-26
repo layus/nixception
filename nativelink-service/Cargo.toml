@@ -51,7 +51,12 @@ tower = { version = "0.5.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 uuid = { version = "1.16.0", default-features = false, features = [
   "serde",
+  # `std` (+ `v4` for `rng`) is required by `Uuid::now_v6` in
+  # `worker_api_server.rs`. It used to arrive transitively via the S3 / Mongo
+  # store deps; now that those are optional, request it explicitly.
+  "std",
   "v4",
+  "v6",
 ] }
 
 [dev-dependencies]

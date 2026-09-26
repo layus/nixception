@@ -6,6 +6,33 @@ edition = "2024"
 name = "nativelink-topology"
 version = "0.7.10"
 
+[features]
+default = []
+# Make the `Aws` / `Gcs` / `Redis` / `Mongo` / `OntapS3*` `topology!` store
+# keywords available, by pulling the matching `nativelink-store` backends in.
+s3 = ["nativelink-store/s3"]
+gcs = ["nativelink-store/gcs"]
+redis = ["nativelink-store/redis", "nativelink-scheduler/redis"]
+mongo = ["nativelink-store/mongo"]
+all-backends = [
+  "s3",
+  "gcs",
+  "redis",
+  "mongo",
+  "nativelink-store/all-backends",
+  "nativelink-scheduler/all-backends",
+]
+# Forwarded for the top-level crate, which reaches the scheduler only through
+# this crate.
+worker_find_logging = ["nativelink-scheduler/worker_find_logging"]
+
+# Compile-coverage for the backend-gated `topology!` store arms. Skipped by a
+# default `cargo test` (the arms are `compile_error!` without their feature);
+# `compile.rs` covers the feature-independent arms.
+[[test]]
+name = "compile_backends"
+required-features = ["all-backends"]
+
 [dependencies]
 nativelink-config = { path = "../nativelink-config" }
 nativelink-scheduler = { path = "../nativelink-scheduler" }
