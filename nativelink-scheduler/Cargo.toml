@@ -6,7 +6,12 @@ name = "nativelink-scheduler"
 version = "0.7.0"
 
 [features]
+default = []
 worker_find_logging = ["nativelink-util/worker_find_logging"]
+# Redis-backed scheduler state (forwards to `nativelink-store/redis`).
+redis = ["nativelink-store/redis"]
+# Convenience: every remote backend, for upstream-parity builds.
+all-backends = ["redis", "nativelink-store/all-backends"]
 
 [dependencies]
 nativelink-config = { path = "../nativelink-config" }
@@ -57,6 +62,11 @@ uuid = { version = "1.16.0", default-features = false, features = [
   "serde",
   "v4",
 ] }
+
+# Redis-backed scheduler state test; skipped unless the `redis` feature is on.
+[[test]]
+name = "redis_store_awaited_action_db_test"
+required-features = ["redis"]
 
 [dev-dependencies]
 nativelink-macro = { path = "../nativelink-macro" }

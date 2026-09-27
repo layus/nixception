@@ -13,13 +13,7 @@
 // limitations under the License.
 
 pub mod ac_server;
-pub mod bep_server;
 pub mod bytestream_server;
 pub mod capabilities_server;
 pub mod cas_server;
 pub mod execution_server;
-pub mod fetch_server;
-pub mod health_server;
-pub mod push_server;
-pub mod remote_asset_proto;
-pub mod worker_api_server;

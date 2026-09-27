@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Compile-only coverage for every `topology!` arm.
+//! Compile-only coverage for every feature-independent `topology!` arm.
 //!
 //! The functions below are never executed — they exist purely so the
 //! compiler type-checks every store and scheduler arm of the macro (the
 //! arms are only validated when expanded). Building this test crate also
 //! confirms the hermetic `$crate::__rt` paths resolve from an external
 //! crate that imports nothing but the macro itself.
+//!
+//! The `Aws` / `Gcs` / `Redis` / `Mongo` / `OntapS3*` arms are gated behind
+//! their `nativelink-store` backend features, so they live in the separate
+//! `compile_backends.rs` test (`required-features = ["all-backends"]`).
 
 use nativelink_topology::topology;
 
-/// Exercises every store and scheduler arm in a single invocation.
+/// Exercises every feature-independent store and scheduler arm in a single
+/// invocation.
 #[expect(dead_code, reason = "compiled, never executed")]
 async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
     let _topology = topology! {
@@ -31,11 +36,7 @@ async fn compile_all_arms() -> Result<(), nativelink_error::Error> {
             mem = Memory { eviction_policy: None },
             nop = Noop,
             nix = Nix { socket_path: None, ..Default::default() },
-            redis = Redis { ..Default::default() },
             reference = Ref { ..Default::default() },
-            aws = Aws { ..Default::default() },
-            gcs = Gcs { ..Default::default() },
-            ontap = OntapS3 { ..Default::default() },
             // Wrapper stores referencing the leaves by name.
             verify           = Verify { backend: mem, verify_size: false, verify_hash: false },
             existence        = ExistenceCache { backend: mem, eviction_policy: None },

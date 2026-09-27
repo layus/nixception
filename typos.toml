@@ -1,6 +1,4 @@
 [default.extend-words]
-# `conly_flags` in lre-cc
-conly = "conly"
 # `typ` is a common Rust convention for avoiding the `type` keyword
 typ = "typ"
 
@@ -13,13 +11,9 @@ extend-ignore-re = [
 
 [files]
 extend-exclude = [
-  # Covered by Vale
   "*.md",
   ".git/*",
-  ".github/styles/*",
-  "kubernetes/vendor/olm/*",
   "nativelink-proto/*",
-  "web/*",
   # Contains old wrongly spelt data
   "nativelink-util/tests/data/*.json",
 ]

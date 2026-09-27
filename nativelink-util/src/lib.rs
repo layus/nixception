@@ -28,7 +28,6 @@ pub mod known_platform_property_provider;
 pub mod metrics_utils;
 pub mod operation_state_manager;
 pub mod origin_event;
-pub mod origin_event_publisher;
 pub mod platform_properties;
 pub mod proto_stream_utils;
 pub mod resource_info;
@@ -38,7 +37,6 @@ pub mod store_trait;
 pub mod task;
 pub mod telemetry;
 pub mod tls_utils;
-pub mod write_counter;
 
 // Re-export tracing mostly for use in macros.
 pub use tracing as __tracing;

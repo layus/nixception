@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["tools/generate-bazel-rc", "vendor"]
+exclude = ["vendor"]
 resolver = "3"
 
 [package]
@@ -20,50 +20,44 @@ opt-level = "z"
 strip = true
 
 [features]
-nix = ["nativelink-worker/nix"]
+# Re-enable every remote storage backend that the default nixception build
+# drops (S3 / GCS / Redis / MongoDB). nixception itself only ever constructs
+# NixStore / NoopStore / ExistenceCacheStore via the `topology!` macro, so
+# these are dead weight for the shipped server — but `just test-standalone`
+# and any upstream-parity build want the full store suite compiled.
+# (`nativelink-topology/all-backends` forwards to the store and scheduler.)
+all-backends = ["nativelink-topology/all-backends"]
 
 # Enable this to get extra debug about workers that are not being used by the CAS
 # for some reason. We don't enable this by default, as it's part of a hot path in
 # the scheduling system, and also that a worker not matching isn't necessarily bad.
 worker_find_logging = [
-  "nativelink-scheduler/worker_find_logging",
+  "nativelink-topology/worker_find_logging",
   "nativelink-util/worker_find_logging",
 ]
 
+# Only what `src/lib.rs` and `src/bin/nixception.rs` actually use. The store /
+# scheduler / service crates are reached through `nativelink-topology`.
 [dependencies]
-nativelink-config = { path = "nativelink-config" }
 nativelink-error = { path = "nativelink-error" }
-nativelink-scheduler = { path = "nativelink-scheduler" }
-nativelink-service = { path = "nativelink-service" }
-nativelink-store = { path = "nativelink-store" }
 nativelink-topology = { path = "nativelink-topology" }
 nativelink-util = { path = "nativelink-util" }
-nativelink-worker = { path = "nativelink-worker" }
 
-async-lock = { version = "3.4.0", features = ["std"], default-features = false }
 axum = { version = "0.8.3", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 hyper = "1.6.0"
 hyper-util = "0.1.11"
 mimalloc = "0.1.44"
-rustls-pemfile = { version = "2.2.0", features = [
-  "std",
-], default-features = false }
-serde_json5 = { version = "0.2.1", default-features = false }
 tokio = { version = "1.44.1", features = [
   "fs",
   "io-util",
+  "net",
   "rt-multi-thread",
   "signal",
 ], default-features = false }
 tokio-rustls = { version = "0.26.2", default-features = false, features = [
   "ring",
 ] }
-tonic = { version = "0.13.0", features = [
-  "tls-ring",
-  "transport",
-], default-features = false }
-tower = { version = "0.5.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 #jsonwebtoken = { version = "10.2.0", features = ["aws_lc_rs"] }
 # gcloud-auth = { version = "1.2.0", features = ["jwt-aws-lc-rs"] }
@@ -71,21 +65,6 @@ tracing = { version = "0.1.41", default-features = false }
 [workspace.dependencies]
 nix-compat = { path = "vendor/tvix/tvix/nix-compat" }
 nix-remote = { path = "vendor/nix-remote-rust/nix-remote" }
-
-[workspace.cargo-features-manager.keep]
-async-lock = ["std"]
-aws-sdk-s3 = ["rt-tokio"]
-aws-smithy-runtime = ["test-util"]
-# This causes blake3 to detect SIMD capabilities at runtime.
-blake3 = ["std"]
-pretty_assertions = ["std"]
-redis-test = ["aio"]
-serial_test = ["async"]
-tokio = ["fs", "io-util", "rt-multi-thread", "signal"]
-tokio-stream = ["fs"]
-tonic = ["tls", "transport"]
-tonic-build = ["prost"]
-uuid = ["serde", "v4"]
 
 [workspace.lints.rust]
 ambiguous-glob-reexports = "deny"

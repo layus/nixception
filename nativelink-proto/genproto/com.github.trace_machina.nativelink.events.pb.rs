@@ -100,7 +100,7 @@ pub struct WriteRequestOverride {
 pub struct RequestEvent {
     #[prost(
         oneof = "request_event::Event",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
     )]
     pub event: ::core::option::Option<request_event::Event>,
 }
@@ -154,19 +154,11 @@ pub mod request_event {
         ),
         #[prost(message, tag = "13")]
         SchedulerStartExecute(super::super::remote_execution::StartExecute),
-        #[prost(message, tag = "14")]
-        FetchBlobRequest(
-            super::super::super::super::super::super::build::bazel::remote::asset::v1::FetchBlobRequest,
-        ),
-        #[prost(message, tag = "15")]
-        PushBlobRequest(
-            super::super::super::super::super::super::build::bazel::remote::asset::v1::PushBlobRequest,
-        ),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ResponseEvent {
-    #[prost(oneof = "response_event::Event", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
+    #[prost(oneof = "response_event::Event", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
     pub event: ::core::option::Option<response_event::Event>,
 }
 /// Nested message and enum types in `ResponseEvent`.
@@ -203,14 +195,6 @@ pub mod response_event {
         ),
         #[prost(message, tag = "9")]
         Empty(()),
-        #[prost(message, tag = "10")]
-        FetchBlobResponse(
-            super::super::super::super::super::super::build::bazel::remote::asset::v1::FetchBlobResponse,
-        ),
-        #[prost(message, tag = "11")]
-        PushBlobResponse(
-            super::super::super::super::super::super::build::bazel::remote::asset::v1::PushBlobResponse,
-        ),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -292,34 +276,4 @@ pub struct OriginEvent {
 pub struct OriginEvents {
     #[prost(message, repeated, tag = "1")]
     pub events: ::prost::alloc::vec::Vec<OriginEvent>,
-}
-/// / Bep event that has occurred.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct BepEvent {
-    /// / The version of this message.
-    #[prost(uint32, tag = "1")]
-    pub version: u32,
-    /// / The identity header that generated the event. This will be populated
-    /// / with the header value keyed by the specified by the
-    /// / `IdentityHeaderSpec::header_name`.
-    #[prost(string, tag = "2")]
-    pub identity: ::prost::alloc::string::String,
-    /// / The event that occurred.
-    #[prost(oneof = "bep_event::Event", tags = "3, 4")]
-    pub event: ::core::option::Option<bep_event::Event>,
-}
-/// Nested message and enum types in `BepEvent`.
-pub mod bep_event {
-    /// / The event that occurred.
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Event {
-        #[prost(message, tag = "3")]
-        LifecycleEvent(
-            super::super::super::super::super::super::google::devtools::build::v1::PublishLifecycleEventRequest,
-        ),
-        #[prost(message, tag = "4")]
-        BuildToolEvent(
-            super::super::super::super::super::super::google::devtools::build::v1::PublishBuildToolEventStreamRequest,
-        ),
-    }
 }

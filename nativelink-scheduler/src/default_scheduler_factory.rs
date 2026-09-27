@@ -26,6 +26,7 @@ use nativelink_error::{Code, Error, ResultExt, make_err, make_input_err};
 use nativelink_proto::com::github::trace_machina::nativelink::events::OriginEvent;
 use nativelink_store::nix_daemon_connection::NixDaemonConnectionPool;
 use nativelink_store::nix_store::NixStore;
+#[cfg(feature = "redis")]
 use nativelink_store::redis_store::RedisStore;
 use nativelink_store::store_manager::StoreManager;
 use nativelink_util::instant_wrapper::InstantWrapper;
@@ -37,6 +38,7 @@ use crate::grpc_scheduler::GrpcScheduler;
 use crate::memory_awaited_action_db::MemoryAwaitedActionDb;
 use crate::property_modifier_scheduler::PropertyModifierScheduler;
 use crate::simple_scheduler::SimpleScheduler;
+#[cfg(feature = "redis")]
 use crate::store_awaited_action_db::StoreAwaitedActionDb;
 use crate::worker_scheduler::WorkerScheduler;
 
@@ -135,7 +137,10 @@ pub fn property_modifier_scheduler_factory(
 
 pub fn simple_scheduler_factory(
     spec: &SimpleSpec,
-    store_manager: &StoreManager,
+    // Only the `redis` backend arm consults the store manager; without that
+    // feature the parameter is unused but the signature is fixed (called from
+    // `topology!` and `inner_scheduler_factory`).
+    #[cfg_attr(not(feature = "redis"), allow(unused_variables))] store_manager: &StoreManager,
     now_fn: fn() -> SystemTime,
     maybe_origin_event_tx: Option<&mpsc::Sender<OriginEvent>>,
 ) -> Result<SchedulerFactoryResults, Error> {
@@ -159,6 +164,7 @@ pub fn simple_scheduler_factory(
             );
             Ok((Some(action_scheduler), Some(worker_scheduler)))
         }
+        #[cfg(feature = "redis")]
         ExperimentalSimpleSchedulerBackend::Redis(redis_config) => {
             let store = store_manager
                 .get_store(redis_config.redis_store.as_ref())
@@ -193,6 +199,11 @@ pub fn simple_scheduler_factory(
             );
             Ok((Some(action_scheduler), Some(worker_scheduler)))
         }
+        #[cfg(not(feature = "redis"))]
+        ExperimentalSimpleSchedulerBackend::Redis(_) => Err(make_input_err!(
+            "This nixception build was compiled without Redis scheduler-backend support \
+             (enable the `redis` feature)"
+        )),
     }
 }
 

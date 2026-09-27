@@ -44,8 +44,9 @@ cargo check --workspace --all-targets   # compiles warning-free
 nix build                               # the release build succeeds
 ```
 
-The development shell installs pre-commit hooks (formatting, typo and lint
-checks) that run automatically on commit.
+Also run `cargo fmt` and, if you touched `nativelink-proto/*.proto`,
+`nativelink-proto/update_protos.sh` (needs `protoc` on `PATH`, provided by the
+development shell).
 
 ## Scope and upstream code
 

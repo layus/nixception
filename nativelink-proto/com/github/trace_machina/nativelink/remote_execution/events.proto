@@ -18,9 +18,7 @@ package com.github.trace_machina.nativelink.events;
 
 import "com/github/trace_machina/nativelink/remote_execution/worker_api.proto";
 import "build/bazel/remote/execution/v2/remote_execution.proto";
-import "build/bazel/remote/asset/v1/remote_asset.proto";
 import "google/bytestream/bytestream.proto";
-import "google/devtools/build/v1/publish_build_event.proto";
 import "google/longrunning/operations.proto";
 import "google/protobuf/empty.proto";
 import "google/rpc/status.proto";
@@ -85,10 +83,8 @@ message RequestEvent {
         build.bazel.remote.execution.v2.WaitExecutionRequest wait_execution_request = 12;
 
         com.github.trace_machina.nativelink.remote_execution.StartExecute scheduler_start_execute = 13;
-
-        build.bazel.remote.asset.v1.FetchBlobRequest fetch_blob_request = 14;
-        build.bazel.remote.asset.v1.PushBlobRequest push_blob_request = 15;
     }
+    reserved 14, 15; // Were remote-asset FetchBlob/PushBlob requests.
     reserved 16; // NextId.
 }
 
@@ -104,10 +100,8 @@ message ResponseEvent {
         google.bytestream.QueryWriteStatusResponse query_write_status_response = 8;
 
         google.protobuf.Empty empty = 9;
-
-        build.bazel.remote.asset.v1.FetchBlobResponse fetch_blob_response = 10;
-        build.bazel.remote.asset.v1.PushBlobResponse push_blob_response = 11;
     }
+    reserved 10, 11; // Were remote-asset FetchBlob/PushBlob responses.
 
     reserved 12; // NextId.
 }
@@ -169,23 +163,4 @@ message OriginEvents {
     repeated OriginEvent events = 1;
 
     reserved 2; // NextId.
-}
-
-/// Bep event that has occurred.
-message BepEvent {
-    /// The version of this message.
-    uint32 version = 1;
-
-    /// The identity header that generated the event. This will be populated
-    /// with the header value keyed by the specified by the
-    /// `IdentityHeaderSpec::header_name`.
-    string identity = 2;
-
-    /// The event that occurred.
-    oneof event {
-        google.devtools.build.v1.PublishLifecycleEventRequest lifecycle_event = 3;
-        google.devtools.build.v1.PublishBuildToolEventStreamRequest build_tool_event = 4;
-    }
-
-    reserved 5; // NextId.
 }

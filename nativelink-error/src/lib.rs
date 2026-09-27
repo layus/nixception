@@ -187,26 +187,6 @@ impl From<tokio::task::JoinError> for Error {
     }
 }
 
-impl From<serde_json5::Error> for Error {
-    fn from(err: serde_json5::Error) -> Self {
-        match err {
-            serde_json5::Error::Message { msg, location } => {
-                if let Some(has_location) = location {
-                    make_err!(
-                        Code::Internal,
-                        "line {}, column {} - {}",
-                        has_location.line,
-                        has_location.column,
-                        msg
-                    )
-                } else {
-                    make_err!(Code::Internal, "{}", msg)
-                }
-            }
-        }
-    }
-}
-
 impl From<core::num::ParseIntError> for Error {
     fn from(err: core::num::ParseIntError) -> Self {
         make_err!(Code::InvalidArgument, "{}", err.to_string())
@@ -235,6 +215,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[cfg(feature = "redis")]
 impl From<fred::error::Error> for Error {
     fn from(error: fred::error::Error) -> Self {
         use fred::error::ErrorKind::{
