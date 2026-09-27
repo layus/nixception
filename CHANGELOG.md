@@ -5,6 +5,29 @@ All notable changes to nixception will be documented in this file.
 The historical changelog of the NativeLink codebase this project is based on
 is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
 
+## [Unreleased]
+
+### Changed
+
+- **Remote storage backends are opt-in.** The S3, GCS, Redis and MongoDB
+  stores (and the Redis scheduler backend) sit behind cargo features
+  (`s3`, `gcs`, `redis`, `mongo`, or `all-backends` on the top crate); the
+  default build no longer compiles `aws-*`, `google-cloud-*`, `fred` or
+  `mongodb`.
+- **Proto codegen no longer needs Bazel.** Regenerate `nativelink-proto/genproto/`
+  with `nativelink-proto/update_protos.sh` (cargo + `protoc`).
+- `flake.nix` takes the Rust toolchain straight from rust-overlay; its dev
+  shell carries only the Rust tooling.
+
+### Removed
+
+- Upstream NativeLink parts nixception never used: the `nativelink-worker`
+  crate; the BEP, Fetch/Push (remote asset), WorkerApi and Health services
+  and their protos; the JSON `CasConfig` server-config format (examples,
+  json5 loader, `store_factory`); the Bazel build; the LRE toolchains, flake
+  modules, container images, templates, `native-cli`, kubernetes/deploy
+  examples and Pulumi.
+
 ## [0.6.1] - 2026-09-13
 
 ### Fixed
