@@ -3,7 +3,7 @@
 All notable changes to nixception will be documented in this file.
 
 The historical changelog of the NativeLink codebase this project is based on
-is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
+is available [upstream](https://github.com/TraceMachina/nativelink/blob/v0.7.0/CHANGELOG.md).
 
 ## [Unreleased]
 
@@ -27,6 +27,10 @@ is preserved in [CHANGELOG-nativelink.md](./CHANGELOG-nativelink.md).
   json5 loader, `store_factory`); the Bazel build; the LRE toolchains, flake
   modules, container images, templates, `native-cli`, kubernetes/deploy
   examples and Pulumi.
+- Leftover upstream repo tooling: `shell.nix` (the flake dev shell replaces
+  it; `.envrc` now uses the flake), the git-cliff, taplo, statix and typos
+  configs, `.mailmap`, the Bazel-era PR template, and the vendored NativeLink
+  changelog (now linked upstream).
 
 ## [0.6.1] - 2026-09-13
 
