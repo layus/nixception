@@ -2480,12 +2480,9 @@ version = "0.7.0"
 dependencies = [
  "byte-unit",
  "humantime",
- "nativelink-error",
- "pretty_assertions",
  "rand 0.9.5",
  "serde",
  "shellexpand",
- "tracing-test",
 ]
 
 [[package]]
@@ -2670,7 +2667,6 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tracing",
- "tracing-subscriber",
  "tracing-test",
  "uuid",
 ]
